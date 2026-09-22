@@ -5,21 +5,29 @@ Miji Index: build the "price growth over time" data behind the Miji Index screen
 
 What it does:
   1. Downloads the FULL HDB resale transaction history (Jan 2017 onwards, data.gov.sg, updated
-     daily) and works out the median resale price per town, per flat type, per YEAR.
-     This is separate from sg_build.py's map data on purpose: sg_build.py only keeps the last
-     12 months (that's all the block map needs); the Miji Index needs the full multi-year trend,
-     which is a much smaller amount of data (26 towns x 5 flat types x ~8 years of numbers,
-     not every individual block).
+     daily) and works out the median resale price per town, per flat type, per YEAR - plus the
+     25th/75th percentile and the sale count, so a thin year can be shown honestly instead of
+     hidden. This is separate from sg_build.py's map data on purpose: sg_build.py only keeps the
+     last 12 months (that's all the block map needs); the Miji Index needs the full multi-year
+     trend, which is a much smaller amount of data (26 towns x 7 types x ~8 years of numbers, not
+     every individual block).
   2. Reads the private_data/d*.json files that ura_build.py already produced earlier in the same
-     run, and works out a median price + $psf per YEAR for each of URA's three market segments
-     (CCR / RCR / OCR). URA's own Data Service only gives about the last 5 years of transactions,
-     so private-property years before that are backward-projected from the earliest real growth
-     rate available and marked as such in the output - never presented as an actual sale.
+     run, and works out median $psf (not total price - condo/landed unit sizes vary too much
+     within a type for a total-price median to mean much) per YEAR for each of URA's three market
+     segments (CCR / RCR / OCR), again with percentiles + sale count. URA's own Data Service only
+     gives about the last 5 years of transactions, so private-property years before that are
+     backward-projected from the earliest real growth rate available and marked as such in the
+     output - never presented as an actual sale.
   3. Every HDB town is assigned to the market segment it actually sits in (see TOWN_SEGMENT below)
-     so "Private (Condo)" and "Landed" numbers for that town use that segment's real trend, scaled
-     to that segment's own $psf level - not one Singapore-wide average.
-  4. Writes index_data/miji_index.json in the shape the Miji Index page expects: one entry per
-     town, one array per flat type, one number per year.
+     so "Private (Condo)" and "Landed" numbers for that town use that segment's real $psf trend,
+     not one Singapore-wide average.
+  4. The most recent slot in every series is NOT "this calendar year so far" (which would be an
+     unfair, partial-year number sitting next to seven full calendar years) - it's a genuine
+     trailing-12-month window ending at build time. Everything from 2019 up to one year before
+     today is still a clean calendar year.
+  5. Writes index_data/miji_index.json in the shape the Miji Index page expects: one entry per
+     town, one object per flat type with {vals, n, p25, p75, low} arrays - one slot per year/TTM
+     window.
 
 This is real, sourced data - HDB side is exact (every registered resale transaction, from HDB
 via data.gov.sg, Open Data Licence, free for personal or commercial use). The private-property
@@ -49,14 +57,23 @@ OUT_DIR = "index_data"
 PRIVATE_DIR = "private_data"
 CACHE_DIR = "index_cache"
 CACHE_HOURS = 20   # the HDB dataset updates daily; no need to re-download more than once a day
+SQM_TO_SQFT = 10.7639  # matches ura_build.py
 
 YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+CALENDAR_YEARS = YEARS[:-1]   # 2019-2025: real, complete calendar years
+CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build_ttm_window below),
+                               # not "2026 so far" - so it's never compared unfairly against a full year
+
+LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
+MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
+
 FLAT_TYPES = ["2-room", "3-room", "4-room", "5-room", "Executive"]
 HDB_FLAT_TYPE_MAP = {
     "2 ROOM": "2-room", "3 ROOM": "3-room", "4 ROOM": "4-room",
     "5 ROOM": "5-room", "EXECUTIVE": "Executive",
     # 1 ROOM and MULTI-GENERATION exist in the raw data but aren't in the Miji Index screener
 }
+PRIVATE_TYPES = ["Private (Condo)", "Landed"]  # shown as $psf, not total price - see build_private_medians
 
 # Every HDB town, assigned to the URA market segment (CCR / RCR / OCR) it actually sits in.
 # This is the standard three-tier split URA itself publishes its private price index by - it is
@@ -75,11 +92,59 @@ TOWN_SEGMENT = {
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; MijiIndexBuilder/1.0; +https://miji.sg)", "Accept": "application/json"}
 LOG = []
+MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 def say(line=""):
     print(str(line), flush=True)
     LOG.append(str(line))
+
+
+# ------------------------------------------------------------------ small stats helpers
+def median(vals):
+    return statistics.median(vals) if vals else None
+
+
+def imed(vals):
+    m = median(vals)
+    return int(round(m)) if m is not None else None
+
+
+def ipctl(vals):
+    """(p25, p75) for a list of numbers - or (v, v) when there's only one, since a percentile
+    needs at least 2 points to mean anything. Never crashes on a thin sample."""
+    if not vals:
+        return (None, None)
+    if len(vals) == 1:
+        v = int(round(vals[0]))
+        return (v, v)
+    q = statistics.quantiles(sorted(vals), n=4, method="inclusive")
+    return (int(round(q[0])), int(round(q[2])))
+
+
+def stats_for(vals):
+    """One year/window's worth of raw numbers -> {n, med, p25, p75}. None if there's nothing."""
+    if not vals:
+        return None
+    p25, p75 = ipctl(vals)
+    return {"n": len(vals), "med": imed(vals), "p25": p25, "p75": p75}
+
+
+# ------------------------------------------------------------------ trailing-12-month window
+def add_months(y, m, delta):
+    idx = (y * 12 + (m - 1)) + delta
+    return idx // 12, idx % 12 + 1
+
+
+def build_ttm_window():
+    """The trailing-12-month window used for the CURRENT_SLOT, anchored to build time (UTC).
+    Returns (set of (year, month) tuples in the window, a human label like 'Oct 2025 - Sep 2026')."""
+    now = time.gmtime()
+    anchor_y, anchor_m = now.tm_year, now.tm_mon
+    months = set(add_months(anchor_y, anchor_m, -i) for i in range(12))
+    start_y, start_m = add_months(anchor_y, anchor_m, -11)
+    label = "%s %d - %s %d" % (MONTH_ABBR[start_m], start_y, MONTH_ABBR[anchor_m], anchor_y)
+    return months, label
 
 
 # ------------------------------------------------------------------ network helpers (same pattern as ura_build.py)
@@ -105,10 +170,6 @@ def get_json(url, tries=4, wait=15, label=""):
             last = e
             time.sleep(5)
     raise RuntimeError("Gave up on %s: %s" % (label or "a request", last))
-
-
-def median(vals):
-    return statistics.median(vals) if vals else None
 
 
 # ------------------------------------------------------------------ 1. HDB resale history (data.gov.sg)
@@ -143,23 +204,25 @@ def parse_csv_rows(path):
         yield from csv.DictReader(f)
 
 
-def build_hdb_medians():
-    """Returns {town_title_case: {flat_type: {year: median_price}}}"""
+def build_hdb_medians(ttm_months):
+    """Returns {town_title_case: {flat_type: {year_or_CURRENT_SLOT: stats_dict}}}.
+    Every year with >=1 real sale is included (flagged as 'low' downstream if it's a thin sample)
+    - years are never hidden just because sales were few, only when there were truly none."""
     path = download_hdb_csv()
     say("Aggregating HDB resale prices by town, flat type and year...")
-    buckets = defaultdict(list)  # (town, flat_type, year) -> [prices]
+    cal_buckets = defaultdict(list)   # (town, ft, year) -> [prices], year in CALENDAR_YEARS
+    ttm_buckets = defaultdict(list)   # (town, ft) -> [prices] inside the trailing-12-month window
     rows_seen = 0
     for row in parse_csv_rows(path):
         rows_seen += 1
         ft = HDB_FLAT_TYPE_MAP.get((row.get("flat_type") or "").strip().upper())
         if not ft:
             continue
-        month = (row.get("month") or "").strip()  # "YYYY-MM"
-        if len(month) < 4 or not month[:4].isdigit():
+        month_s = (row.get("month") or "").strip()  # "YYYY-MM"
+        if len(month_s) < 7 or not month_s[:4].isdigit() or not month_s[5:7].isdigit():
             continue
-        year = int(month[:4])
-        if year not in YEARS:
-            continue
+        year = int(month_s[:4])
+        mon = int(month_s[5:7])
         try:
             price = float(row.get("resale_price") or 0)
         except ValueError:
@@ -169,17 +232,25 @@ def build_hdb_medians():
         town = (row.get("town") or "").strip().title().replace("Hdb", "HDB")
         # Fix a couple of data.gov.sg's town spellings to match the site's display names
         town = {"Kallang/Whampoa": "Kallang/Whampoa", "Central Area": "Central Area"}.get(town, town)
-        buckets[(town, ft, year)].append(price)
+        if year in CALENDAR_YEARS:
+            cal_buckets[(town, ft, year)].append(price)
+        if (year, mon) in ttm_months:
+            ttm_buckets[(town, ft)].append(price)
     if rows_seen < 100000:
         raise SystemExit("STOP: only read %d rows from the HDB dataset (expected several hundred thousand). "
                           "The download may be incomplete - existing index data was left untouched." % rows_seen)
     say("   read %d transaction rows" % rows_seen)
 
     out = defaultdict(lambda: defaultdict(dict))
-    for (town, ft, year), prices in buckets.items():
-        if len(prices) >= 5:  # too few sales in a town/type/year to call anything "typical"
-            out[town][ft][year] = int(round(median(prices)))
-    return out, sorted(set(t for t, _, _ in buckets))
+    for (town, ft, year), prices in cal_buckets.items():
+        s = stats_for(prices)
+        if s:
+            out[town][ft][year] = s
+    for (town, ft), prices in ttm_buckets.items():
+        s = stats_for(prices)
+        if s:
+            out[town][ft][CURRENT_SLOT] = s
+    return out, sorted(set(t for t, _, _ in cal_buckets) | set(t for t, _ in ttm_buckets))
 
 
 # ------------------------------------------------------------------ 2. Private property, from ura_build.py's own output
@@ -190,23 +261,21 @@ def group_of(ptype):
     return "condo"  # includes executive condominium - Miji Index doesn't split EC out separately
 
 
-def build_private_medians():
+def build_private_medians(ttm_months):
     """Reads private_data/d*.json (built earlier in the same run by ura_build.py) and returns
-    {segment: {"Private (Condo)": {year: median_price}, "Landed": {year: median_price}}}
-    for segment in CCR/RCR/OCR. Returns {} (not an error) if private_data isn't there - the HDB
-    side of the Miji Index still works on its own."""
+    {segment: {"Private (Condo)": {"values": {year_or_CURRENT_SLOT: stats_dict}, "estimated_years": [...]}, "Landed": {...}}}
+    for segment in CCR/RCR/OCR. The published number is median $psf, not total price - condo and
+    landed unit sizes vary too much within a type for a total-price median to mean much; $psf is
+    what's actually comparable across projects. Returns {} (not an error) if private_data isn't
+    there - the HDB side of the Miji Index still works on its own."""
     if not os.path.isdir(PRIVATE_DIR):
         say("No %s folder found (ura_build.py hasn't run yet in this job) - "
             "Miji Index will only have HDB data this time." % PRIVATE_DIR)
         return {}
     say("Reading private-property transactions already downloaded by ura_build.py...")
-    # segment -> group -> year -> [prices]. This was missing a level (only segment -> group -> a
-    # single list) while the line below indexes it by year - so `buckets[seg][group]` was an empty
-    # list and `[year]` (e.g. 2022) tried to index into that list by position, always raising
-    # "IndexError: list index out of range" on the very first transaction in every single district
-    # file. That's the actual reason Condo/Landed have been empty in every run, not the years-window
-    # issue fixed last time (which was real too, but never got a chance to matter until this is fixed).
-    buckets = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    # seg -> group -> year_or_CURRENT_SLOT -> [psf values]
+    cal_buckets = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    ttm_buckets = defaultdict(lambda: defaultdict(list))
     files_read = 0
     skipped_files = []
     for name in sorted(os.listdir(PRIVATE_DIR)):
@@ -224,12 +293,18 @@ def build_private_medians():
                     if len(t) < 6:
                         continue  # a row from an older/shorter format - skip rather than crash
                     ym, price = t[0], t[1]
+                    sqm = t[2] if len(t) > 2 else None
                     ptype_idx = t[5]
                     ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
-                    year = ym // 100
-                    if year not in YEARS:
-                        continue
-                    buckets[seg][group_of(ptype)][year].append(price)
+                    if not sqm or sqm <= 0 or not price or price <= 0:
+                        continue  # can't get a $psf out of this row - skip it, don't fake a size
+                    year, mon = ym // 100, ym % 100
+                    psf = price / (sqm * SQM_TO_SQFT)
+                    g = group_of(ptype)
+                    if year in CALENDAR_YEARS:
+                        cal_buckets[seg][g][year].append(psf)
+                    if (year, mon) in ttm_months:
+                        ttm_buckets[seg][g].append(psf)
         except Exception as e:
             # One oddly-shaped district file shouldn't take down the whole build - skip it and
             # carry on with the rest, which is far better than losing all the private data.
@@ -244,77 +319,100 @@ def build_private_medians():
         return {}
     say("   read %d district files" % files_read)
 
+    segs = set(list(cal_buckets.keys()) + list(ttm_buckets.keys()))
     out = {}
-    for seg, groups in buckets.items():
+    for seg in segs:
         out[seg] = {}
-        for group, by_year in groups.items():
-            label = "Private (Condo)" if group == "condo" else "Landed"
-            real_years = {y: int(round(median(p))) for y, p in by_year.items() if len(p) >= 5}
-            if not real_years:
+        for group, label in (("condo", "Private (Condo)"), ("landed", "Landed")):
+            real = {}
+            for y in CALENDAR_YEARS:
+                vals = cal_buckets.get(seg, {}).get(group, {}).get(y)
+                s = stats_for(vals) if vals else None
+                if s:
+                    real[y] = s
+            ttm_vals = ttm_buckets.get(seg, {}).get(group)
+            ttm_stats = stats_for(ttm_vals) if ttm_vals else None
+            if ttm_stats:
+                real[CURRENT_SLOT] = ttm_stats
+            if not real:
                 continue
-            # URA's Data Service only gives ~5 years back, AND the current year often doesn't have
-            # enough sales yet to clear the >=5-per-year bar above. Project both directions using
-            # the earliest year-over-year growth rate we do have, rather than inventing an
-            # unrelated number. Marked in the output as "est".
-            #
-            # Bug fix: this used to only fill backward (older years than the real window). If the
-            # real data didn't reach all the way to the latest year in YEARS (very likely for the
-            # current, still-in-progress year - see above), that year was left out of `filled`
-            # entirely, main() below requires every year in YEARS to be present before it will use
-            # this segment at all, and so EVERY segment failed that check - which is why Condo and
-            # Landed came out empty for every single town, not just some.
-            filled, est_years = dict(real_years), []
-            known = sorted(real_years)
+            # URA's Data Service only gives ~5 years back, AND the current window can still be
+            # thin for a slow segment/group. Project both directions using the earliest
+            # year-over-year $psf growth rate we do have, rather than inventing an unrelated
+            # number. Filled slots are marked in the output as estimated - never shown as a real sale.
+            filled, est_slots = dict(real), []
+            known = sorted(y for y in real if y != CURRENT_SLOT) or sorted(real)
             if len(known) >= 2:
-                growth = real_years[known[1]] / real_years[known[0]] if real_years[known[0]] else 1.0
+                growth = real[known[1]]["med"] / real[known[0]]["med"] if real[known[0]]["med"] else 1.0
             else:
                 growth = 1.0
             growth = max(growth, 0.5)  # guard against a wild or negative rate from thin data
-            for y in sorted(YEARS, reverse=True):  # backward: older than the real window
+            for y in sorted(CALENDAR_YEARS, reverse=True):  # backward: older than the real window
                 if y in filled:
                     continue
-                nxt = y + 1
-                if nxt in filled:
-                    filled[y] = int(round(filled[nxt] / growth))
-                    est_years.append(y)
-            for y in sorted(YEARS):  # forward: newer than the real window (e.g. the current year)
+                nxt = y + 1 if y + 1 in filled else None
+                if nxt is not None:
+                    filled[y] = {"n": 0, "med": int(round(filled[nxt]["med"] / growth)), "p25": None, "p75": None}
+                    est_slots.append(y)
+            fill_order = sorted(CALENDAR_YEARS) + [CURRENT_SLOT]
+            for y in fill_order:  # forward: newer than the real window (incl. the TTM slot)
                 if y in filled:
                     continue
-                prv = y - 1
+                prv = y - 1 if y != CURRENT_SLOT else CALENDAR_YEARS[-1]
                 if prv in filled:
-                    filled[y] = int(round(filled[prv] * growth))
-                    est_years.append(y)
-            out[seg][label] = {"values": filled, "estimated_years": sorted(est_years)}
+                    filled[y] = {"n": 0, "med": int(round(filled[prv]["med"] * growth)), "p25": None, "p75": None}
+                    est_slots.append(y)
+            out[seg][label] = {"values": filled, "estimated_slots": sorted(est_slots)}
     return out
 
 
 # ------------------------------------------------------------------ 3. combine + write
+def slots_to_entry(stats_by_slot):
+    """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low}
+    ready to publish. A slot that's missing entirely stays null across the board - never faked."""
+    vals, ns, p25s, p75s, lows = [], [], [], [], []
+    for y in YEARS:
+        s = stats_by_slot.get(y)
+        if not s or s.get("med") is None:
+            vals.append(None); ns.append(None); p25s.append(None); p75s.append(None); lows.append(False)
+        else:
+            vals.append(s["med"]); ns.append(s.get("n")); p25s.append(s.get("p25")); p75s.append(s.get("p75"))
+            n = s.get("n") or 0
+            lows.append(n < LOW_SAMPLE_N)
+    return {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows}
+
+
 def main():
     say("Miji Index data builder | %s" % time.strftime("%Y-%m-%d %H:%M"))
-    hdb, towns_seen = build_hdb_medians()
-    private = build_private_medians()
+    ttm_months, ttm_label = build_ttm_window()
+    say("   trailing-12-month window for the latest slot: %s" % ttm_label)
+    hdb, towns_seen = build_hdb_medians(ttm_months)
+    private = build_private_medians(ttm_months)
 
     unmapped = [t for t in towns_seen if t not in TOWN_SEGMENT]
     if unmapped:
         say("   NOTE: these towns appeared in the HDB data but aren't in TOWN_SEGMENT yet, "
             "so they'll have no private-property numbers until added: %s" % ", ".join(unmapped))
 
+    private_estimated = {}
     result_towns = {}
     for town, by_type in hdb.items():
         entry = {}
         for ft in FLAT_TYPES:
-            years = by_type.get(ft, {})
-            if len(years) >= 4:  # need a reasonable span of years to call it a trend
-                entry[ft] = [years.get(y) for y in YEARS]
-        if not entry:
-            continue
+            slots = by_type.get(ft, {})
+            if len(slots) >= MIN_YEARS_PRESENT:
+                entry[ft] = slots_to_entry(slots)
         seg = TOWN_SEGMENT.get(town)
         if seg and seg in private:
             for label, d in private[seg].items():
                 vals = d["values"]
                 if all(y in vals for y in YEARS):
-                    entry[label] = [vals[y] for y in YEARS]
-        result_towns[town] = entry
+                    entry[label] = slots_to_entry(vals)
+                    if seg not in private_estimated:
+                        private_estimated[seg] = {}
+                    private_estimated[seg][label] = d["estimated_slots"]
+        if entry:
+            result_towns[town] = entry
 
     if len(result_towns) < 20:
         raise SystemExit("STOP: only %d towns came out with usable data (expected 20+). "
@@ -325,21 +423,24 @@ def main():
     payload = {
         "built": time.strftime("%Y-%m-%d"),
         "years": YEARS,
+        "current_slot_label": ttm_label,   # what the last "year" tick actually means - see docstring
+        "low_sample_n": LOW_SAMPLE_N,
         "sources": {
             "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
-                   "Every registered resale transaction, median per town/flat type/year. "
-                   "Singapore Open Data Licence - free for personal or commercial use.",
+                   "Every registered resale transaction, median per town/flat type/year (25th-75th "
+                   "percentile and sale count included). Singapore Open Data Licence - free for "
+                   "personal or commercial use.",
             "private": "Urban Redevelopment Authority (URA), Private Residential Property "
-                       "Transactions, via the URA Data Service API. Grouped by URA market segment "
-                       "(CCR/RCR/OCR) and applied to each town in that segment - an estimate, not "
-                       "a per-town transaction median. Years older than URA's ~5-year window are "
-                       "backward-projected from the earliest available growth rate and marked in "
-                       "'estimated_years' below.",
+                       "Transactions, via the URA Data Service API. Median $ per square foot, "
+                       "grouped by URA market segment (CCR/RCR/OCR) and applied to each town in "
+                       "that segment - an estimate, not a per-town transaction median. Years older "
+                       "than URA's ~5-year window are backward-projected from the earliest "
+                       "available growth rate and marked in 'private_estimated_slots' below.",
+            "current_slot": "The most recent point in every series is a trailing 12-month window "
+                             "(%s), not a partial calendar year - so it's never compared unfairly "
+                             "against a full year of data." % ttm_label,
         },
-        "private_estimated_years": {
-            seg: {label: d["estimated_years"] for label, d in groups.items()}
-            for seg, groups in private.items()
-        },
+        "private_estimated_slots": private_estimated,
         "towns": result_towns,
     }
     tmp_path = out_path + ".tmp"
