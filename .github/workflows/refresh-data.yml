@@ -152,3 +152,36 @@ jobs:
             git pull --rebase origin "$GITHUB_REF_NAME"
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
+
+      - name: Build the Miji Index data
+        timeout-minutes: 60
+        run: python3 miji_index_build.py
+ 
+      - name: Check the Miji Index data before using it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = "index_data/miji_index.json"
+          if not os.path.exists(path):
+              sys.exit("STOP: no index_data/miji_index.json. The live Miji Index data is unchanged.")
+          with open(path, encoding="utf-8") as f:
+              d = json.load(f)
+          towns = d.get("towns", {})
+          if len(towns) < 20:
+              sys.exit("STOP: only %d towns (expected 20+). The live Miji Index data is unchanged." % len(towns))
+          print("OK: %d towns, built %s" % (len(towns), d.get("built")))
+          PY
+ 
+      - name: Publish the Miji Index data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index_data
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Monthly Miji Index refresh $(date -u +%Y-%m-%d)"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+ 
