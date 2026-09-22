@@ -47,7 +47,7 @@ jobs:
             echo "No new lookups to save."
           else
             git commit -m "Save address lookups"
-            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git pull --no-rebase -X ours origin "$GITHUB_REF_NAME" --no-edit
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
 
@@ -135,7 +135,7 @@ jobs:
             echo "No new lookups to save."
           else
             git commit -m "Save private-home address lookups"
-            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git pull --no-rebase -X ours origin "$GITHUB_REF_NAME" --no-edit
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
 
