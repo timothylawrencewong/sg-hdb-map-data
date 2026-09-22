@@ -202,26 +202,37 @@ def build_private_medians():
     say("Reading private-property transactions already downloaded by ura_build.py...")
     buckets = defaultdict(lambda: defaultdict(list))  # segment -> group -> [(year, price)]
     files_read = 0
+    skipped_files = []
     for name in sorted(os.listdir(PRIVATE_DIR)):
         if not (name.startswith("d") and name.endswith(".json")):
             continue
-        with open(os.path.join(PRIVATE_DIR, name), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        types = data.get("types", [])
-        for proj in data.get("P", []):
-            seg = (proj.get("seg") or "").upper()
-            if seg not in ("CCR", "RCR", "OCR"):
-                continue
-            for t in proj.get("T", []):
-                if len(t) < 6: continue  
-                ym, price = t[0], t[1]
-                ptype_idx = t[5]
-                ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
-                year = ym // 100
-                if year not in YEARS:
+        try:
+            with open(os.path.join(PRIVATE_DIR, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            types = data.get("types", [])
+            for proj in data.get("P", []):
+                seg = (proj.get("seg") or "").upper()
+                if seg not in ("CCR", "RCR", "OCR"):
                     continue
-                buckets[seg][group_of(ptype)][year].append(price)
+                for t in proj.get("T", []):
+                    if len(t) < 6:
+                        continue  # a row from an older/shorter format - skip rather than crash
+                    ym, price = t[0], t[1]
+                    ptype_idx = t[5]
+                    ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
+                    year = ym // 100
+                    if year not in YEARS:
+                        continue
+                    buckets[seg][group_of(ptype)][year].append(price)
+        except Exception as e:
+            # One oddly-shaped district file shouldn't take down the whole build - skip it and
+            # carry on with the rest, which is far better than losing all the private data.
+            skipped_files.append("%s (%s: %s)" % (name, type(e).__name__, e))
+            continue
         files_read += 1
+    if skipped_files:
+        say("   NOTE: skipped %d district file(s) that didn't parse as expected: %s" %
+            (len(skipped_files), "; ".join(skipped_files)))
     if not files_read:
         say("   %s existed but had no district files in it - skipping private data." % PRIVATE_DIR)
         return {}
