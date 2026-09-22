@@ -396,12 +396,18 @@ def main():
 
     private_estimated = {}
     result_towns = {}
+    borderline = []  # (town, type, n_years, sale_years) - had *some* real data but got dropped anyway
     for town, by_type in hdb.items():
         entry = {}
         for ft in FLAT_TYPES:
             slots = by_type.get(ft, {})
             if len(slots) >= MIN_YEARS_PRESENT:
                 entry[ft] = slots_to_entry(slots)
+            elif slots:
+                # There WAS at least one real sale somewhere in 2019-2026, just not in enough
+                # different years to draw a trend line (need >=2). Not the same as zero sales ever -
+                # logged here so it's visible instead of silently looking identical to "no data at all".
+                borderline.append((town, ft, len(slots), sorted(slots.keys())))
         seg = TOWN_SEGMENT.get(town)
         if seg and seg in private:
             for label, d in private[seg].items():
@@ -413,6 +419,16 @@ def main():
                     private_estimated[seg][label] = d["estimated_slots"]
         if entry:
             result_towns[town] = entry
+
+    if borderline:
+        say("   NOTE: %d town/type combo(s) had at least one real sale in 2019-2026 but not in "
+            "enough different years to draw a trend (need data in >=%d years) - shown as blank "
+            "on the site, not the same as zero sales ever:" % (len(borderline), MIN_YEARS_PRESENT))
+        for town, ft, n_years, sale_years in sorted(borderline):
+            say("      %s / %s: real data in %s only" % (town, ft, sale_years))
+    else:
+        say("   Every town/type combo with any 2019-2026 sales cleared the >=%d-year bar - "
+            "every remaining blank is a genuine zero sales, not a filtered borderline case." % MIN_YEARS_PRESENT)
 
     if len(result_towns) < 20:
         raise SystemExit("STOP: only %d towns came out with usable data (expected 20+). "
