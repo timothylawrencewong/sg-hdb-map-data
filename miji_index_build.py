@@ -200,7 +200,13 @@ def build_private_medians():
             "Miji Index will only have HDB data this time." % PRIVATE_DIR)
         return {}
     say("Reading private-property transactions already downloaded by ura_build.py...")
-    buckets = defaultdict(lambda: defaultdict(list))  # segment -> group -> [(year, price)]
+    # segment -> group -> year -> [prices]. This was missing a level (only segment -> group -> a
+    # single list) while the line below indexes it by year - so `buckets[seg][group]` was an empty
+    # list and `[year]` (e.g. 2022) tried to index into that list by position, always raising
+    # "IndexError: list index out of range" on the very first transaction in every single district
+    # file. That's the actual reason Condo/Landed have been empty in every run, not the years-window
+    # issue fixed last time (which was real too, but never got a chance to matter until this is fixed).
+    buckets = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     files_read = 0
     skipped_files = []
     for name in sorted(os.listdir(PRIVATE_DIR)):
