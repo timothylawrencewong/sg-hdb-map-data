@@ -1,0 +1,189 @@
+name: Refresh map data
+
+on:
+  schedule:
+    - cron: '0 4 3 * *'     # the 3rd of every month, 12:00 noon Singapore time
+  workflow_dispatch:         # adds the "Run workflow" button on the Actions tab
+
+permissions:
+  contents: write            # lets this job save the new data into the repo
+
+concurrency:
+  group: refresh-map-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The slow part of a build is looking up addresses on OneMap. Those answers are kept in the
+      # geocode-cache folder, so only new streets, schools and shops need a lookup each month.
+      - name: Bring back the saved address lookups
+        run: |
+          mkdir -p sg_cache geocode-cache
+          cp geocode-cache/*.json sg_cache/ 2>/dev/null || echo "No saved lookups yet (first run), so this one is slow."
+
+      - name: Build the data
+        timeout-minutes: 270
+        run: python3 sg_build.py
+
+      # Runs even if the build stopped half way, so the next run carries on from here.
+      # This is just a performance cache, not real data, so on a conflict we always keep the
+      # copy this run just produced rather than trying to reconcile with another run's copy.
+      - name: Save the address lookups
+        if: always()
+        run: |
+          mkdir -p geocode-cache
+          cp sg_cache/geocode.json sg_cache/streets.json geocode-cache/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add geocode-cache
+          if git diff --cached --quiet; then
+            echo "No new lookups to save."
+          else
+            git commit -m "Save address lookups"
+            git pull --no-rebase -X ours origin "$GITHUB_REF_NAME" --no-edit
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      # sg_build.py does not fail loudly when something goes wrong, so check the result here.
+      # If anything looks off, the job stops and the current data folder is left alone.
+      - name: Check the new data before using it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          def load(folder):
+              path = os.path.join(folder, "towns.json")
+              if not os.path.exists(path):
+                  return None
+              with open(path, encoding="utf-8") as f:
+                  return json.load(f)
+
+          new = load("sg_data")
+          if not new or not new.get("towns"):
+              sys.exit("STOP: the build did not finish (no sg_data/towns.json). The live data is unchanged.")
+
+          towns = new["towns"]
+          blocks = sum(t["n"] for t in towns)
+          for t in towns:
+              path = os.path.join("sg_data", t["slug"] + ".json")
+              if not os.path.exists(path):
+                  sys.exit("STOP: %s is missing. The live data is unchanged." % path)
+              with open(path, encoding="utf-8") as f:
+                  d = json.load(f)
+              if not d.get("B"):
+                  sys.exit("STOP: %s has no blocks. The live data is unchanged." % path)
+
+          old = load("data")
+          if old and old.get("towns"):
+              old_blocks = sum(t["n"] for t in old["towns"])
+              if len(towns) < max(20, len(old["towns"]) - 2):
+                  sys.exit("STOP: only %d towns now, was %d. The live data is unchanged." % (len(towns), len(old["towns"])))
+              if blocks < 0.85 * old_blocks:
+                  sys.exit("STOP: only %d blocks now, was %d. The live data is unchanged." % (blocks, old_blocks))
+
+          print("OK: %d towns, %d blocks, built %s" % (len(towns), blocks, new.get("built")))
+          PY
+
+      - name: Publish the new data
+        run: |
+          rm -rf data
+          mv sg_data data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Monthly data refresh $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      # ---------------------------------------------------------------------------------------
+      # PRIVATE HOMES (URA). Runs after the HDB data is published, because it reuses the MRT,
+      # school, hawker and supermarket lists in the data folder.
+      # Needs a repository secret called URA_ACCESS_KEY (Settings > Secrets and variables > Actions).
+      # If this part stops, the HDB data above is already saved and private_data is left untouched.
+      # ---------------------------------------------------------------------------------------
+      - name: Build the private-home data
+        timeout-minutes: 240
+        env:
+          URA_ACCESS_KEY: ${{ secrets.URA_ACCESS_KEY }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          mkdir -p ura_cache
+          cp geocode-cache/ura_geocode.json ura_cache/geocode.json 2>/dev/null || echo "No saved private-home lookups yet, so this run is slow."
+          python3 ura_build.py
+
+      # Only the address lookups are saved (public map positions). URA's own downloads are NOT saved.
+      # Same as above: this is just a cache, so on a conflict we always keep this run's copy.
+      - name: Save the private-home address lookups
+        if: always()
+        run: |
+          mkdir -p geocode-cache
+          cp ura_cache/geocode.json geocode-cache/ura_geocode.json 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add geocode-cache
+          if git diff --cached --quiet; then
+            echo "No new lookups to save."
+          else
+            git commit -m "Save private-home address lookups"
+            git pull --no-rebase -X ours origin "$GITHUB_REF_NAME" --no-edit
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      - name: Publish the private-home data
+        run: |
+          test -f private_data/index.json || { echo "STOP: no private_data/index.json"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add private_data
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Monthly private-home refresh $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      - name: Build the Miji Index data
+        timeout-minutes: 60
+        run: python3 miji_index_build.py
+
+      - name: Check the Miji Index data before using it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = "index_data/miji_index.json"
+          if not os.path.exists(path):
+              sys.exit("STOP: no index_data/miji_index.json. The live Miji Index data is unchanged.")
+          with open(path, encoding="utf-8") as f:
+              d = json.load(f)
+          towns = d.get("towns", {})
+          if len(towns) < 20:
+              sys.exit("STOP: only %d towns (expected 20+). The live Miji Index data is unchanged." % len(towns))
+          print("OK: %d towns, built %s" % (len(towns), d.get("built")))
+          PY
+
+      - name: Publish the Miji Index data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index_data
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Monthly Miji Index refresh $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
