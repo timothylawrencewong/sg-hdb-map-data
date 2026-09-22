@@ -246,21 +246,37 @@ def build_private_medians():
             real_years = {y: int(round(median(p))) for y, p in by_year.items() if len(p) >= 5}
             if not real_years:
                 continue
-            # URA's Data Service only gives ~5 years back. For any earlier year in our 2019-2026
-            # range, project backward using the earliest year-over-year growth rate we do have,
-            # rather than inventing an unrelated number. Marked in the output as "est".
+            # URA's Data Service only gives ~5 years back, AND the current year often doesn't have
+            # enough sales yet to clear the >=5-per-year bar above. Project both directions using
+            # the earliest year-over-year growth rate we do have, rather than inventing an
+            # unrelated number. Marked in the output as "est".
+            #
+            # Bug fix: this used to only fill backward (older years than the real window). If the
+            # real data didn't reach all the way to the latest year in YEARS (very likely for the
+            # current, still-in-progress year - see above), that year was left out of `filled`
+            # entirely, main() below requires every year in YEARS to be present before it will use
+            # this segment at all, and so EVERY segment failed that check - which is why Condo and
+            # Landed came out empty for every single town, not just some.
             filled, est_years = dict(real_years), []
             known = sorted(real_years)
             if len(known) >= 2:
-                first_growth = real_years[known[1]] / real_years[known[0]] if real_years[known[0]] else 1.0
+                growth = real_years[known[1]] / real_years[known[0]] if real_years[known[0]] else 1.0
             else:
-                first_growth = 1.0
-            for y in sorted(YEARS, reverse=True):
+                growth = 1.0
+            growth = max(growth, 0.5)  # guard against a wild or negative rate from thin data
+            for y in sorted(YEARS, reverse=True):  # backward: older than the real window
                 if y in filled:
                     continue
                 nxt = y + 1
                 if nxt in filled:
-                    filled[y] = int(round(filled[nxt] / max(first_growth, 0.5)))
+                    filled[y] = int(round(filled[nxt] / growth))
+                    est_years.append(y)
+            for y in sorted(YEARS):  # forward: newer than the real window (e.g. the current year)
+                if y in filled:
+                    continue
+                prv = y - 1
+                if prv in filled:
+                    filled[y] = int(round(filled[prv] * growth))
                     est_years.append(y)
             out[seg][label] = {"values": filled, "estimated_years": sorted(est_years)}
     return out
