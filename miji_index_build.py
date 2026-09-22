@@ -213,6 +213,7 @@ def build_private_medians():
             if seg not in ("CCR", "RCR", "OCR"):
                 continue
             for t in proj.get("T", []):
+                if len(t) < 6: continue  
                 ym, price = t[0], t[1]
                 ptype_idx = t[5]
                 ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
