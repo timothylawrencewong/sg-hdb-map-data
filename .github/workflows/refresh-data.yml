@@ -102,7 +102,7 @@ jobs:
             echo "Nothing changed."
           else
             git commit -m "Monthly data refresh $(date -u +%Y-%m-%d)"
-            git pull --rebase origin "$GITHUB_REF_NAME"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
 
@@ -135,7 +135,7 @@ jobs:
             echo "No new lookups to save."
           else
             git commit -m "Save private-home address lookups"
-            git pull --rebase origin "$GITHUB_REF_NAME"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
 
@@ -149,7 +149,7 @@ jobs:
             echo "Nothing changed."
           else
             git commit -m "Monthly private-home refresh $(date -u +%Y-%m-%d)"
-            git pull --rebase origin "$GITHUB_REF_NAME"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
 
@@ -181,7 +181,7 @@ jobs:
             echo "Nothing changed."
           else
             git commit -m "Monthly Miji Index refresh $(date -u +%Y-%m-%d)"
-            git pull --rebase origin "$GITHUB_REF_NAME"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
             git push origin HEAD:"$GITHUB_REF_NAME"
           fi
  
