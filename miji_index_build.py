@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Miji Index: build the "price growth over time" data behind the Miji Index screener/charts
-(HDB resale by town + flat type, and private property by town, back to 2019).
+(HDB resale by town + flat type, and private property by town, over a rolling 8-year window).
 
 What it does:
   1. Downloads the FULL HDB resale transaction history (Jan 2017 onwards, data.gov.sg, updated
@@ -23,8 +23,10 @@ What it does:
      not one Singapore-wide average.
   4. The most recent slot in every series is NOT "this calendar year so far" (which would be an
      unfair, partial-year number sitting next to seven full calendar years) - it's a genuine
-     trailing-12-month window ending at build time. Everything from 2019 up to one year before
-     today is still a clean calendar year.
+     trailing-12-month window ending at build time. Everything else - the 7 years before that -
+     is a clean, complete calendar year, and the whole 8-year window shifts forward by one year
+     every time this runs in a new year (YEARS is computed from today's date, not hardcoded), so
+     it never needs to be manually bumped.
   5. Writes index_data/miji_index.json in the shape the Miji Index page expects: one entry per
      town, one object per flat type with {vals, n, p25, p75, low} arrays - one slot per year/TTM
      window.
@@ -59,10 +61,13 @@ CACHE_DIR = "index_cache"
 CACHE_HOURS = 20   # the HDB dataset updates daily; no need to re-download more than once a day
 SQM_TO_SQFT = 10.7639  # matches ura_build.py
 
-YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
-CALENDAR_YEARS = YEARS[:-1]   # 2019-2025: real, complete calendar years
+_NOW_YEAR = time.gmtime().tm_year
+YEARS = list(range(_NOW_YEAR - 7, _NOW_YEAR + 1))  # a rolling 8-year window ending at THIS year -
+# computed fresh every run, not a fixed list. Without this, the chart would freeze at whatever
+# years it was first written with and never advance as real time passes.
+CALENDAR_YEARS = YEARS[:-1]   # the 7 most recent complete calendar years
 CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build_ttm_window below),
-                               # not "2026 so far" - so it's never compared unfairly against a full year
+                               # not "this year so far" - so it's never compared unfairly against a full year
 
 LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
 MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
@@ -404,7 +409,7 @@ def main():
             if len(slots) >= MIN_YEARS_PRESENT:
                 entry[ft] = slots_to_entry(slots)
             elif slots:
-                # There WAS at least one real sale somewhere in 2019-2026, just not in enough
+                # There WAS at least one real sale somewhere in the YEARS window, just not in enough
                 # different years to draw a trend line (need >=2). Not the same as zero sales ever -
                 # logged here so it's visible instead of silently looking identical to "no data at all".
                 borderline.append((town, ft, len(slots), sorted(slots.keys())))
@@ -421,14 +426,14 @@ def main():
             result_towns[town] = entry
 
     if borderline:
-        say("   NOTE: %d town/type combo(s) had at least one real sale in 2019-2026 but not in "
+        say("   NOTE: %d town/type combo(s) had at least one real sale in %d-%d but not in "
             "enough different years to draw a trend (need data in >=%d years) - shown as blank "
-            "on the site, not the same as zero sales ever:" % (len(borderline), MIN_YEARS_PRESENT))
+            "on the site, not the same as zero sales ever:" % (len(borderline), YEARS[0], YEARS[-1], MIN_YEARS_PRESENT))
         for town, ft, n_years, sale_years in sorted(borderline):
             say("      %s / %s: real data in %s only" % (town, ft, sale_years))
     else:
-        say("   Every town/type combo with any 2019-2026 sales cleared the >=%d-year bar - "
-            "every remaining blank is a genuine zero sales, not a filtered borderline case." % MIN_YEARS_PRESENT)
+        say("   Every town/type combo with any %d-%d sales cleared the >=%d-year bar - "
+            "every remaining blank is a genuine zero sales, not a filtered borderline case." % (YEARS[0], YEARS[-1], MIN_YEARS_PRESENT))
 
     if len(result_towns) < 20:
         raise SystemExit("STOP: only %d towns came out with usable data (expected 20+). "
