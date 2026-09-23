@@ -492,6 +492,116 @@ def build_recent_private_transactions(recent_months=RECENT_MONTHS):
     return rows
 
 
+# ------------------------------------------------------------------ 2b. same-block / same-project price history (Check a Unit)
+def build_hdb_block_history():
+    """Median resale price per YEAR for every (town, block, street, flat type) combination -
+    the block-level equivalent of build_hdb_medians() above, just keyed one level deeper. This is
+    what lets Check a Unit show "how has THIS block's price moved over the years" (the same idea
+    as PropertyGuru's same-block, multi-year comparison), as a separate, much smaller number
+    (one median per block per year) rather than every individual transaction going back years,
+    which would bloat recent_transactions.json 10x+ for comparatively little benefit. Reuses the
+    same cached CSV download_hdb_csv() already saved (no second download). Isolated pass, on
+    purpose - wrapped in its own try/except at the call site so a problem here can never affect
+    miji_index.json or recent_transactions.json, both already live."""
+    path = download_hdb_csv()
+    say("Aggregating HDB resale prices by block, for the same-block price-history view...")
+    buckets = defaultdict(lambda: defaultdict(list))  # (town, blk, st, ft) -> year -> [prices]
+    for row in parse_csv_rows(path):
+        ft = HDB_FLAT_TYPE_MAP.get((row.get("flat_type") or "").strip().upper())
+        if not ft:
+            continue
+        month_s = (row.get("month") or "").strip()
+        if len(month_s) < 7 or not month_s[:4].isdigit() or not month_s[5:7].isdigit():
+            continue
+        year = int(month_s[:4])
+        if year not in YEARS:   # same rolling 8-year window as the Miji Index above
+            continue
+        try:
+            price = float(row.get("resale_price") or 0)
+        except ValueError:
+            continue
+        if price <= 0:
+            continue
+        blk = (row.get("block") or "").strip()
+        st = (row.get("street_name") or "").strip().title()
+        if not blk or not st:
+            continue
+        town = (row.get("town") or "").strip().title().replace("Hdb", "HDB")
+        town = {"Kallang/Whampoa": "Kallang/Whampoa", "Central Area": "Central Area"}.get(town, town)
+        buckets[(town, blk, st, ft)][year].append(price)
+
+    out = []
+    for (town, blk, st, ft), by_year in buckets.items():
+        years_out = {}
+        for y, prices in by_year.items():
+            m = imed(prices)
+            if m is not None:
+                years_out[str(y)] = {"med": m, "n": len(prices)}
+        if years_out:
+            out.append({"town": town, "blk": blk, "st": st, "type": ft, "years": years_out})
+    say("   built price history for %d block + flat-type combinations" % len(out))
+    return out
+
+
+def build_private_project_history():
+    """Median $psf per YEAR for every private project (+ property type within it) - the
+    project-level equivalent of build_private_medians(). Reuses the private_data/d*.json files
+    ura_build.py already wrote earlier in this run (no new URA API call). URA's Data Service only
+    gives ~5 real years, same ceiling as the Index above - but unlike the Index, this does NOT
+    backward-project older years, since a fabricated point on one specific project's chart would
+    be misleading in a way a townwide trend estimate isn't. A project's history here simply stops
+    where the real data does."""
+    if not os.path.isdir(PRIVATE_DIR):
+        return []
+    say("Aggregating private-property prices by project, for the same-project price-history view...")
+    buckets = defaultdict(lambda: defaultdict(list))  # (project, street, seg, group) -> year -> [psf]
+    skipped_files = []
+    for name in sorted(os.listdir(PRIVATE_DIR)):
+        if not (name.startswith("d") and name.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(PRIVATE_DIR, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            types = data.get("types", [])
+            for proj in data.get("P", []):
+                seg = (proj.get("seg") or "").upper()
+                if seg not in ("CCR", "RCR", "OCR"):
+                    continue
+                pname = proj.get("n") or ""
+                pstreet = proj.get("s") or ""
+                for t in proj.get("T", []):
+                    if len(t) < 8:
+                        continue
+                    ym, price, sqm = t[0], t[1], t[2]
+                    ptype_idx, units = t[5], t[7]
+                    if units != 1 or not sqm or sqm <= 0 or not price or price <= 0:
+                        continue
+                    year = ym // 100
+                    if year not in YEARS:
+                        continue
+                    ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
+                    psf = price / (sqm * SQM_TO_SQFT)
+                    buckets[(pname, pstreet, seg, group_of(ptype))][year].append(psf)
+        except Exception as e:
+            skipped_files.append("%s (%s: %s)" % (name, type(e).__name__, e))
+            continue
+    if skipped_files:
+        say("   NOTE: skipped %d district file(s) that didn't parse as expected: %s" %
+            (len(skipped_files), "; ".join(skipped_files)))
+
+    out = []
+    for (pname, pstreet, seg, group), by_year in buckets.items():
+        years_out = {}
+        for y, psfs in by_year.items():
+            m = imed(psfs)
+            if m is not None:
+                years_out[str(y)] = {"med_psf": m, "n": len(psfs)}
+        if years_out:
+            out.append({"project": pname, "street": pstreet, "seg": seg, "type": group, "years": years_out})
+    say("   built price history for %d private projects" % len(out))
+    return out
+
+
 # ------------------------------------------------------------------ 3. combine + write
 def slots_to_entry(stats_by_slot):
     """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low}
@@ -627,6 +737,43 @@ def main():
         say("")
         say("NOTE: recent_transactions.json was NOT updated this run (miji_index.json above is "
             "unaffected) - %s: %s" % (type(e).__name__, e))
+
+    # ------------------------------------------------------------------ 5. same-block / same-project price history, for Check a Unit
+    # Deliberately AFTER and isolated from both files above - same reasoning as the
+    # recent_transactions.json block: a problem here should never take down anything already live.
+    try:
+        block_hist_hdb = build_hdb_block_history()
+        block_hist_private = build_private_project_history()
+        block_hist_path = os.path.join(OUT_DIR, "block_history.json")
+        block_hist_payload = {
+            "built": time.strftime("%Y-%m-%d"),
+            "years": YEARS,
+            "hdb": block_hist_hdb,
+            "private": block_hist_private,
+            "sources": {
+                "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
+                       "Median resale price per block, flat type and year, over the same rolling "
+                       "%d-year window as the Miji Index above - for Check a Unit's same-block "
+                       "price-history view, not individual transactions." % len(YEARS),
+                "private": "Urban Redevelopment Authority (URA), Private Residential Property "
+                           "Transactions, via the URA Data Service API. Median $ per square foot "
+                           "per project, property type and year. URA's Data Service only gives "
+                           "about the last 5 years of real transactions - unlike the Miji Index, "
+                           "older years are left blank here rather than projected, since an "
+                           "estimated point on one specific project's own chart would be "
+                           "misleading in a way it isn't on a townwide trend.",
+            },
+        }
+        block_hist_tmp = block_hist_path + ".tmp"
+        with open(block_hist_tmp, "w", encoding="utf-8") as f:
+            json.dump(block_hist_payload, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(block_hist_tmp, block_hist_path)
+        say("Done. %d HDB block + %d private project histories written to %s" %
+            (len(block_hist_hdb), len(block_hist_private), block_hist_path))
+    except Exception as e:
+        say("")
+        say("NOTE: block_history.json was NOT updated this run (miji_index.json and "
+            "recent_transactions.json above are unaffected) - %s: %s" % (type(e).__name__, e))
 
 
 if __name__ == "__main__":
