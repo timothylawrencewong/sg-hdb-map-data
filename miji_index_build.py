@@ -72,6 +72,10 @@ CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build
 LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
 MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
 
+RECENT_MONTHS = 8   # how far back "Check a Unit" comparables look - matches the site copy
+                     # ("sold in the past 8 months"). Independent of YEARS/CURRENT_SLOT above -
+                     # this feeds a different output file (recent_transactions.json), not the Index.
+
 FLAT_TYPES = ["2-room", "3-room", "4-room", "5-room", "Executive"]
 HDB_FLAT_TYPE_MAP = {
     "2 ROOM": "2-room", "3 ROOM": "3-room", "4 ROOM": "4-room",
@@ -258,6 +262,58 @@ def build_hdb_medians(ttm_months):
     return out, sorted(set(t for t, _, _ in cal_buckets) | set(t for t, _ in ttm_buckets))
 
 
+def build_recent_hdb_transactions(recent_months=RECENT_MONTHS):
+    """Individual HDB resale transactions from the last `recent_months` months - the raw material
+    for the Check a Unit comparables tool. Reuses the same cached CSV build_hdb_medians() already
+    downloaded (download_hdb_csv() caches for CACHE_HOURS, so this never triggers a second
+    download) but keeps the per-transaction fields the median-building throws away: block, street,
+    storey range and remaining lease. Every row here is a real transaction - nothing estimated or
+    backward-projected (that only happens on the private-property side, in
+    build_recent_private_transactions). Runs as its own pass over the CSV rather than being folded
+    into build_hdb_medians(), on purpose - so a bug here can never affect the Index numbers that
+    are already live."""
+    path = download_hdb_csv()
+    say("Extracting individual HDB transactions from the last %d months (for Check a Unit)..." % recent_months)
+    now = time.gmtime()
+    cutoff_y, cutoff_m = add_months(now.tm_year, now.tm_mon, -(recent_months - 1))
+    cutoff_ym = cutoff_y * 100 + cutoff_m
+    rows = []
+    for row in parse_csv_rows(path):
+        ft = HDB_FLAT_TYPE_MAP.get((row.get("flat_type") or "").strip().upper())
+        if not ft:
+            continue
+        month_s = (row.get("month") or "").strip()
+        if len(month_s) < 7 or not month_s[:4].isdigit() or not month_s[5:7].isdigit():
+            continue
+        year, mon = int(month_s[:4]), int(month_s[5:7])
+        ym = year * 100 + mon
+        if ym < cutoff_ym:
+            continue
+        try:
+            price = float(row.get("resale_price") or 0)
+            area = float(row.get("floor_area_sqm") or 0)
+        except ValueError:
+            continue
+        if price <= 0 or area <= 0:
+            continue
+        town = (row.get("town") or "").strip().title().replace("Hdb", "HDB")
+        town = {"Kallang/Whampoa": "Kallang/Whampoa", "Central Area": "Central Area"}.get(town, town)
+        rows.append({
+            "town": town,
+            "type": ft,
+            "blk": (row.get("block") or "").strip(),
+            "st": (row.get("street_name") or "").strip().title(),
+            "storey": (row.get("storey_range") or "").strip(),    # e.g. "10 TO 12" - a band; HDB
+                                                                     # never publishes an exact floor
+            "sqm": round(area, 1),
+            "lease": (row.get("remaining_lease") or "").strip(),  # e.g. "67 years 04 months"
+            "price": int(price),
+            "ym": ym,
+        })
+    say("   kept %d individual transactions from the last %d months" % (len(rows), recent_months))
+    return rows
+
+
 # ------------------------------------------------------------------ 2. Private property, from ura_build.py's own output
 def group_of(ptype):
     t = str(ptype).lower()
@@ -371,6 +427,71 @@ def build_private_medians(ttm_months):
     return out
 
 
+def build_recent_private_transactions(recent_months=RECENT_MONTHS):
+    """Individual private-property transactions from the last `recent_months` months, read from
+    the same private_data/d*.json files build_private_medians() already reads (written earlier in
+    the same run by ura_build.py) - no second URA API call, no new use of your AccessKey. Only
+    single-unit sales are kept (a bulk/multi-unit sale distorts a per-unit comparison - the same
+    rule ura_build.py's own compact_project() already applies for its psf summaries). Returns []
+    if private_data isn't there, same as build_private_medians(). Runs as its own pass for the same
+    reason as build_recent_hdb_transactions() - isolated from the numbers already live on the Index."""
+    if not os.path.isdir(PRIVATE_DIR):
+        return []
+    say("Extracting individual private-property transactions from the last %d months..." % recent_months)
+    now = time.gmtime()
+    cutoff_y, cutoff_m = add_months(now.tm_year, now.tm_mon, -(recent_months - 1))
+    cutoff_ym = cutoff_y * 100 + cutoff_m
+    rows = []
+    skipped_files = []
+    for name in sorted(os.listdir(PRIVATE_DIR)):
+        if not (name.startswith("d") and name.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(PRIVATE_DIR, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            types = data.get("types", [])
+            tenures = data.get("tenures", [])
+            for proj in data.get("P", []):
+                seg = (proj.get("seg") or "").upper()
+                if seg not in ("CCR", "RCR", "OCR"):
+                    continue
+                pname = proj.get("n") or ""
+                pstreet = proj.get("s") or ""
+                for t in proj.get("T", []):
+                    # columns, per ura_build.py's compact_project(): [ym, price, sqm, floor, sale,
+                    # type_idx, tenure_idx, units, areaType_idx]
+                    if len(t) < 8:
+                        continue  # a row from an older/shorter format - skip rather than crash
+                    ym, price, sqm, floor = t[0], t[1], t[2], t[3]
+                    ptype_idx, tenure_idx, units = t[5], t[6], t[7]
+                    if units != 1:
+                        continue  # bulk sale - not a fair per-unit comparison
+                    if ym < cutoff_ym or not sqm or sqm <= 0 or not price or price <= 0:
+                        continue
+                    ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
+                    tenure = tenures[tenure_idx] if 0 <= tenure_idx < len(tenures) else ""
+                    rows.append({
+                        "project": pname,
+                        "street": pstreet,
+                        "seg": seg,
+                        "type": group_of(ptype),   # "condo" or "landed" - matches build_private_medians' own grouping
+                        "ptype": ptype,             # URA's raw property type, e.g. "Apartment", "Terrace"
+                        "tenure": tenure,
+                        "floor": floor,             # URA's floorRange band, e.g. "10 TO 12" - not an exact floor
+                        "sqm": round(sqm, 1),
+                        "price": int(price),
+                        "ym": ym,
+                    })
+        except Exception as e:
+            skipped_files.append("%s (%s: %s)" % (name, type(e).__name__, e))
+            continue
+    if skipped_files:
+        say("   NOTE: skipped %d district file(s) that didn't parse as expected: %s" %
+            (len(skipped_files), "; ".join(skipped_files)))
+    say("   kept %d individual private-property transactions from the last %d months" % (len(rows), recent_months))
+    return rows
+
+
 # ------------------------------------------------------------------ 3. combine + write
 def slots_to_entry(stats_by_slot):
     """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low}
@@ -470,6 +591,42 @@ def main():
     os.replace(tmp_path, out_path)
     say("")
     say("Done. %d towns written to %s" % (len(result_towns), out_path))
+
+    # ------------------------------------------------------------------ 4. recent individual transactions, for Check a Unit
+    # Deliberately AFTER the Index above is safely written, and deliberately wrapped so any problem
+    # here - a bad row, a changed column name, a format ura_build.py hasn't produced yet - can never
+    # stop miji_index.json (which the live site already depends on) from being written. Worst case
+    # if this block fails: the Index updates as normal and recent_transactions.json just doesn't
+    # refresh this run, logged below rather than silently swallowed.
+    try:
+        recent_hdb = build_recent_hdb_transactions()
+        recent_private = build_recent_private_transactions()
+        recent_path = os.path.join(OUT_DIR, "recent_transactions.json")
+        recent_payload = {
+            "built": time.strftime("%Y-%m-%d"),
+            "recent_months": RECENT_MONTHS,
+            "hdb": recent_hdb,
+            "private": recent_private,
+            "sources": {
+                "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
+                       "Individual transactions from the last %d months (block, street, storey "
+                       "range, floor area, remaining lease, price) - for the Check a Unit "
+                       "comparables tool, not the Index above." % RECENT_MONTHS,
+                "private": "Urban Redevelopment Authority (URA), Private Residential Property "
+                           "Transactions, via the URA Data Service API. Individual single-unit "
+                           "sales only from the last %d months." % RECENT_MONTHS,
+            },
+        }
+        recent_tmp = recent_path + ".tmp"
+        with open(recent_tmp, "w", encoding="utf-8") as f:
+            json.dump(recent_payload, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(recent_tmp, recent_path)
+        say("Done. %d HDB + %d private transactions written to %s" %
+            (len(recent_hdb), len(recent_private), recent_path))
+    except Exception as e:
+        say("")
+        say("NOTE: recent_transactions.json was NOT updated this run (miji_index.json above is "
+            "unaffected) - %s: %s" % (type(e).__name__, e))
 
 
 if __name__ == "__main__":
