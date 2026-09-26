@@ -77,6 +77,12 @@ TOP_N = 5
 MIN_HDB_ROWS = 500     # a sane floor for "6 months of nationwide HDB resales" - well under the
                        # real number, just enough to catch a badly broken/partial download
 MIN_PRIVATE_ROWS = 150  # same idea for URA - lower bar since private volumes are smaller
+MILLION = 1_000_000
+REGION_ORDER = ["CCR", "RCR", "OCR"]   # fixed display order (URA's own convention), not sorted by
+                                        # count - so the region mini-grid doesn't reshuffle week to week
+TREND_WEEKS = 4        # how many points (this week + up to 3 earlier) the mini price/psf trend shows
+HISTORY_KEEP = 12       # how many past weekly snapshots weekly_summary.json keeps around - more than
+                        # TREND_WEEKS needs, as a small buffer
 
 SQM_TO_SQFT = midx.SQM_TO_SQFT
 say = midx.say
@@ -154,6 +160,67 @@ def psf(price, sqm):
     if not price or not sqm:
         return None
     return round(price / (sqm * SQM_TO_SQFT), 1)
+
+
+def region_breakdown(rows):
+    """Median $psf and count per CCR/RCR/OCR, for NON-LANDED private rows only (a "seg" tag doesn't
+    apply the same way to landed) - skips a region entirely if there were no qualifying rows,
+    rather than showing it as a hollow $0 card."""
+    out = []
+    for seg in REGION_ORDER:
+        seg_rows = [r for r in rows if r.get("seg") == seg]
+        if not seg_rows:
+            continue
+        out.append({
+            "seg": seg,
+            "count": len(seg_rows),
+            "median_psf": median_or_none([r["psf"] for r in seg_rows if r.get("psf")]),
+        })
+    return out
+
+
+def trend_points(history_list, current_value, current_label, field):
+    """Up to TREND_WEEKS points (this week's value plus however many earlier weeks are on hand,
+    capped at TREND_WEEKS - 1) for a small week-over-week price/psf trend. Grows from 1 point to
+    TREND_WEEKS points over its first few real runs - there's no way around that, since the history
+    genuinely doesn't exist yet on early runs."""
+    pts = [{"week_label": h.get("week_label"), "value": h.get(field)} for h in history_list[-(TREND_WEEKS - 1):]]
+    pts.append({"week_label": current_label, "value": current_value})
+    return pts
+
+
+def trend_change_pct(points):
+    """Only a real number once the trend has genuinely spanned TREND_WEEKS - a 2-point trend saying
+    '+4.8%' would imply a month-long move that this data doesn't yet support."""
+    if len(points) < TREND_WEEKS:
+        return None
+    return pct_change(points[-1]["value"], points[0]["value"])
+
+
+def build_signals(new_hdb, above_1m_count, type_bd, sale_bd, region_bd, first_run):
+    """A handful of short, auto-written one-liners that call out whatever's actually notable in
+    this week's numbers - not an opinion on whether that's good or bad, just what stands out.
+    Returns [] on the first run (nothing genuinely "this week" to point at yet) and skips any
+    signal whose underlying data is empty, rather than forcing a hollow line."""
+    if first_run or not new_hdb:
+        return []
+    signals = []
+    if above_1m_count:
+        signals.append("%d HDB resale flat%s crossed $1M this week." % (
+            above_1m_count, "" if above_1m_count == 1 else "s"))
+    if type_bd:
+        top = type_bd[0]
+        signals.append("%s flats made up %s%% of this week's HDB resales." % (top["label"], top["pct"]))
+    if sale_bd:
+        top = sale_bd[0]
+        signals.append("%s made up %s%% of this week's private transactions." % (top["label"], top["pct"]))
+    if region_bd and len(region_bd) > 1:
+        top = max(region_bd, key=lambda r: r["count"])
+        total = sum(r["count"] for r in region_bd)
+        if total:
+            signals.append("%s accounted for %s%% of this week's non-landed private transactions." % (
+                top["seg"], round(top["count"] / total * 100, 1)))
+    return signals[:4]
 
 
 # ------------------------------------------------------------------ HDB
@@ -343,6 +410,10 @@ def main():
 
     new_condo = [r for r in new_priv if r["type"] == "condo"]
     new_landed = [r for r in new_priv if r["type"] == "landed"]
+    above_1m_count = sum(1 for r in new_hdb if r["price"] >= MILLION)
+    hdb_type_bd = breakdown(new_hdb, "type")
+    priv_sale_bd = breakdown(new_priv, "sale_type")
+    priv_region_bd = region_breakdown(new_condo)
 
     # Week-over-week price movement. Compared against LAST week's "new this week" median, not
     # against the whole 6-month window - so this is genuinely "how this week's activity compares to
@@ -350,32 +421,51 @@ def main():
     # there's nothing to compare on the first run OR the run right after it (that run's own median
     # becomes the very first baseline) - the third run is the first with a real percentage.
     prev_summary = load_summary()
+    history = prev_summary.get("history") or []
+    week_label = week_label_now()
     median_hdb_price = median_or_none([r["price"] for r in new_hdb])
     median_condo_psf = median_or_none([r["psf"] for r in new_condo])
     hdb_price_change_pct = None if first_run else pct_change(median_hdb_price, prev_summary.get("median_hdb_price"))
     condo_psf_change_pct = None if first_run else pct_change(median_condo_psf, prev_summary.get("median_condo_psf"))
 
+    # The 4-week trend reuses the same history this run is about to append to - so it's whatever's
+    # accumulated so far (as little as 1 point right after the first run) growing to TREND_WEEKS
+    # points over its first few real weeks. Empty on the first run, same as everything else "new."
+    hdb_trend = [] if first_run else trend_points(history, median_hdb_price, week_label, "median_hdb_price")
+    condo_trend = [] if first_run else trend_points(history, median_condo_psf, week_label, "median_condo_psf")
+    hdb_trend_change_pct = None if first_run else trend_change_pct(hdb_trend)
+    condo_trend_change_pct = None if first_run else trend_change_pct(condo_trend)
+
+    signals = build_signals(new_hdb, above_1m_count, hdb_type_bd, priv_sale_bd, priv_region_bd, first_run)
+
     out = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "week_label": week_label_now(),
+        "week_label": week_label,
         "first_run": first_run,
+        "signals": signals,
         "hdb": {
             "new_count": len(new_hdb),
             "top": top_by_price(new_hdb),
             "top_psf": top_by_psf(new_hdb),
             "cheapest": cheapest_by_price(new_hdb),
             "busiest_town": busiest_town,
-            "type_breakdown": breakdown(new_hdb, "type"),
+            "type_breakdown": hdb_type_bd,
             "median_price": median_hdb_price,
             "median_price_change_pct": hdb_price_change_pct,
+            "above_1m_count": above_1m_count,
+            "trend_4w": hdb_trend,
+            "trend_change_pct": hdb_trend_change_pct,
         },
         "private": {
             "new_count": len(new_priv),
             "top_condo": top_by_price(new_condo),
             "top_landed": top_by_price(new_landed),
-            "sale_type_breakdown": breakdown(new_priv, "sale_type"),
+            "sale_type_breakdown": priv_sale_bd,
             "median_condo_psf": median_condo_psf,
             "median_condo_psf_change_pct": condo_psf_change_pct,
+            "region_breakdown": priv_region_bd,
+            "psf_trend_4w": condo_trend,
+            "psf_trend_change_pct": condo_trend_change_pct,
         },
     }
 
@@ -397,8 +487,20 @@ def main():
     # This run's medians become next week's "old" number to compare against - saved even when
     # they're None (first run, or a week with zero qualifying sales), since load_summary().get(...)
     # already treats a missing/None value as "no comparable week yet" the same way either way.
-    save_summary({"median_hdb_price": median_hdb_price, "median_condo_psf": median_condo_psf})
-    say("Saved this week's median price/psf for next week's comparison")
+    # The first run doesn't get a history entry - its median is a placeholder-free baseline, not a
+    # genuine "this week" number, so it shouldn't become a fake first point on the trend.
+    if not first_run:
+        history = (history + [{
+            "week_label": week_label,
+            "median_hdb_price": median_hdb_price,
+            "median_condo_psf": median_condo_psf,
+        }])[-HISTORY_KEEP:]
+    save_summary({
+        "median_hdb_price": median_hdb_price,
+        "median_condo_psf": median_condo_psf,
+        "history": history,
+    })
+    say("Saved this week's median price/psf (and %d weeks of trend history) for next week's comparison" % len(history))
 
 
 if __name__ == "__main__":
