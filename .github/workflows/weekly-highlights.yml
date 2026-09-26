@@ -1,0 +1,100 @@
+name: Weekly market update
+
+# Separate from refresh-data.yml on purpose. That pipeline (sg_build.py -> ura_build.py ->
+# miji_index_build.py) only runs once a month and does slow OneMap geocoding - fine for the map,
+# but it would make a "weekly" update show the same numbers for weeks in a row. This job is much
+# lighter (no geocoding at all - just prices and counts) so it can actually run every week.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'    # every Monday, 12:00 noon Singapore time (same "noon SGT" convention
+                            # refresh-data.yml uses - 04:00 UTC = 12:00 SGT, UTC+8)
+  workflow_dispatch:         # adds the "Run workflow" button on the Actions tab, for a manual run
+
+permissions:
+  contents: write             # lets this job save the new data (and its own week-to-week memory) into the repo
+
+concurrency:
+  group: weekly-market-update
+  cancel-in-progress: false
+
+jobs:
+  weekly-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # weekly_state/weekly_seen.json is NOT a performance cache like sg_cache/ura_cache below -
+      # it's the actual memory of what was already counted, so this job's own repo checkout above
+      # already has it (it's committed, unlike index_cache/ura_cache which never are). Nothing
+      # extra to restore here.
+
+      - name: Build this week's highlights
+        timeout-minutes: 20
+        env:
+          URA_ACCESS_KEY: ${{ secrets.URA_ACCESS_KEY }}
+          PYTHONUNBUFFERED: '1'
+        run: python3 miji_weekly_highlights.py
+
+      # miji_weekly_highlights.py does not fail loudly on its own (same reasoning as the monthly
+      # pipeline's own check step) - so double check the result here before publishing it.
+      - name: Check the new data before using it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          path = "index_data/weekly_highlights.json"
+          if not os.path.exists(path):
+              sys.exit("STOP: no index_data/weekly_highlights.json. The live weekly update is unchanged.")
+          with open(path, encoding="utf-8") as f:
+              d = json.load(f)
+          if "week_label" not in d or "hdb" not in d or "private" not in d:
+              sys.exit("STOP: weekly_highlights.json doesn't look right (missing week_label/hdb/private).")
+          if not os.path.exists("weekly_state/weekly_seen.json"):
+              sys.exit("STOP: weekly_state/weekly_seen.json is missing - next week's comparison would break.")
+          print("OK: week_label=%r, first_run=%r, hdb.new_count=%s, private.new_count=%s" % (
+              d.get("week_label"), d.get("first_run"), d["hdb"].get("new_count"), d["private"].get("new_count")))
+          PY
+
+      - name: Publish this week's highlights
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index_data/weekly_highlights.json weekly_state/weekly_seen.json
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+          else
+            git commit -m "Weekly market update $(date -u +%Y-%m-%d)"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      # jsdelivr normally takes up to 24h to notice a file changed on the @main branch. That's fine
+      # for the monthly build, but this page/email should look fresh the same morning - so ask
+      # jsdelivr to refresh its copy right away. If this ever fails, it's harmless: the site just
+      # shows the new numbers a bit later instead of immediately.
+      - name: Ask jsdelivr to refresh its cached copy
+        run: |
+          curl -s -o /dev/null "https://purge.jsdelivr.net/gh/timothylawrencewong/sg-hdb-map-data@main/index_data/weekly_highlights.json" || true
+
+      # Sends the weekly email. The Edge Function itself decides whether there's actually anything
+      # worth emailing (it skips a first run with nothing to compare yet, skips a week with zero
+      # new transactions, and skips a week already sent) - so it's fine to always call it here.
+      - name: Send the weekly email
+        env:
+          SEND_WEEKLY_UPDATE_URL: ${{ secrets.SEND_WEEKLY_UPDATE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$SEND_WEEKLY_UPDATE_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "SEND_WEEKLY_UPDATE_URL or CRON_SECRET isn't set as a repo secret yet - skipping the email step. The page's data is still published above."
+            exit 0
+          fi
+          curl -sS -X POST "$SEND_WEEKLY_UPDATE_URL" \
+            -H "content-type: application/json" \
+            -H "x-cron-secret: $CRON_SECRET" \
+            --data @index_data/weekly_highlights.json \
+            -w "\nHTTP %{http_code}\n"
