@@ -23,6 +23,9 @@ Why "new" isn't simply "the last 7 days":
   the FIRST time - genuinely new to the data this week, even if the underlying sale was registered
   a little earlier. That's also why the page/email should say "newly added to the data this
   week," not "sold this week" - it's the honest framing for what this data actually is.
+  A second, much smaller state file (weekly_state/weekly_summary.json) remembers just last week's
+  median HDB price and median condo $psf, so this run can say whether those moved up or down versus
+  last week - everything else in this script only needs weekly_seen.json.
   Sources: data.gov.sg's page for the HDB resale dataset (updated daily, organised by
   registration date) and URA's REALIS "Coverage and Methodology" page (caveats transmitted twice
   weekly; new-sale/developer data released every Friday).
@@ -45,6 +48,7 @@ Standard library only, nothing to install.
 
 import json
 import os
+import statistics
 import sys
 import time
 from collections import Counter
@@ -55,6 +59,17 @@ import ura_build as ura
 OUT_DIR = "index_data"
 STATE_DIR = "weekly_state"
 SEEN_PATH = os.path.join(STATE_DIR, "weekly_seen.json")
+SUMMARY_PATH = os.path.join(STATE_DIR, "weekly_summary.json")   # last week's median price/psf, for
+                                                                  # the week-over-week change shown
+                                                                  # alongside this week's numbers -
+                                                                  # separate from weekly_seen.json
+                                                                  # (that one's a fingerprint list,
+                                                                  # this one's just two numbers)
+
+# URA's own typeOfSale codes (confirmed on URA's PMI_Resi_Transaction API reference: 1=New Sale,
+# 2=Sub Sale, 3=Resale - not something this codebase mapped before, so this is the first place it's
+# spelled out).
+SALE_TYPE_MAP = {1: "New Sale", 2: "Sub Sale", 3: "Resale"}
 LOOKBACK_MONTHS = 6   # how far back a transaction can be and still count as "new" the first time
                        # it's seen - generous enough to cover HDB's registration lag and any
                        # late-appearing URA caveat, without keeping fingerprints forever
@@ -87,6 +102,52 @@ def save_seen(counts):
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(SEEN_PATH, "w", encoding="utf-8") as f:
         json.dump(counts, f, separators=(",", ":"))
+
+
+def load_summary():
+    if not os.path.exists(SUMMARY_PATH):
+        return {}
+    try:
+        with open(SUMMARY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_summary(summary):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
+        json.dump(summary, f, separators=(",", ":"))
+
+
+def median_or_none(vals):
+    vals = [v for v in vals if v]
+    return round(statistics.median(vals), 1) if vals else None
+
+
+def pct_change(new_val, old_val):
+    """None unless BOTH weeks have a real, positive number to compare - a 0 or missing old value
+    would make a percentage change either divide-by-zero or meaningless (not "infinity percent up",
+    just "no comparable week yet")."""
+    if new_val is None or old_val is None or not old_val:
+        return None
+    return round((new_val - old_val) / old_val * 100, 1)
+
+
+def breakdown(rows, field, labels=None):
+    """{value: count} over `rows`, as a list of {label, count, pct} sorted by count descending -
+    used for both the HDB flat-type mix and the private new-sale/sub-sale/resale mix. `labels`, if
+    given, renames a raw value (e.g. "condo" -> "Condo") - rows without a usable value are skipped
+    rather than forced into a bucket."""
+    total = len(rows)
+    if not total:
+        return []
+    counts = Counter(r.get(field) for r in rows if r.get(field))
+    out = []
+    for value, count in counts.most_common():
+        label = (labels or {}).get(value, value)
+        out.append({"label": label, "count": count, "pct": round(count / total * 100, 1)})
+    return out
 
 
 def psf(price, sqm):
@@ -132,6 +193,7 @@ def hdb_rows(cutoff_ym):
             "lease": (row.get("remaining_lease") or "").strip(),
             "price": int(price),
             "ym": ym,
+            "psf": psf(price, area),
         })
     say("   %d HDB rows in the last %d months" % (len(rows), LOOKBACK_MONTHS))
     return rows
@@ -160,6 +222,10 @@ def private_rows(cutoff_ym):
                 continue
             ptype = t.get("ptype") or ""
             floor = t.get("floor") or ""
+            try:
+                sale_code = int(t.get("sale") or 0)
+            except (TypeError, ValueError):
+                sale_code = 0
             rows.append({
                 "key": "P|%s|%s|%d|%d|%.1f|%s|%s" % (
                     name.upper(), street.upper(), ym, int(price), area, floor, ptype.upper(),
@@ -169,6 +235,7 @@ def private_rows(cutoff_ym):
                 "seg": seg if seg in ("CCR", "RCR", "OCR") else "",
                 "type": midx.group_of(ptype),   # "condo" (incl. EC) or "landed" - matches the rest of the site
                 "ptype": ptype,
+                "sale_type": SALE_TYPE_MAP.get(sale_code, ""),   # "New Sale" / "Sub Sale" / "Resale" / "" if unknown
                 "tenure": t.get("tenure") or "",
                 "floor": floor,
                 "sqm": round(area, 1),
@@ -201,11 +268,31 @@ def new_only(rows, seen):
     return new, counts
 
 
+def _strip_key(rows):
+    return [{k: v for k, v in r.items() if k != "key"} for r in rows]
+
+
 def top_by_price(rows, n=TOP_N):
     """Top N by price, with the internal dedup "key" fingerprint stripped out - that's plumbing
     for this script's own week-to-week comparison, not something the page or email should show."""
-    top = sorted(rows, key=lambda r: -r["price"])[:n]
-    return [{k: v for k, v in r.items() if k != "key"} for r in top]
+    return _strip_key(sorted(rows, key=lambda r: -r["price"])[:n])
+
+
+def cheapest_by_price(rows):
+    """The single lowest-priced row, or None - Miji's own "affordability first" angle: every other
+    stat here leads with "highest," this is the one that speaks to a budget-conscious buyer."""
+    if not rows:
+        return None
+    return _strip_key([min(rows, key=lambda r: r["price"])])[0]
+
+
+def top_by_psf(rows, n=TOP_N):
+    """Same idea as top_by_price but ranked by $ per square foot - a small unit in a hot area can
+    have a striking $psf even when its total price isn't the week's biggest number, which is
+    genuinely different information from "highest price." Rows with no psf (shouldn't happen, but
+    defensive) are left out rather than sorting as if they were $0/sqft."""
+    ranked = [r for r in rows if r.get("psf")]
+    return _strip_key(sorted(ranked, key=lambda r: -r["psf"])[:n])
 
 
 def week_label_now():
@@ -257,6 +344,17 @@ def main():
     new_condo = [r for r in new_priv if r["type"] == "condo"]
     new_landed = [r for r in new_priv if r["type"] == "landed"]
 
+    # Week-over-week price movement. Compared against LAST week's "new this week" median, not
+    # against the whole 6-month window - so this is genuinely "how this week's activity compares to
+    # last week's," not a slow-moving long-run average. Like every other "new this week" number,
+    # there's nothing to compare on the first run OR the run right after it (that run's own median
+    # becomes the very first baseline) - the third run is the first with a real percentage.
+    prev_summary = load_summary()
+    median_hdb_price = median_or_none([r["price"] for r in new_hdb])
+    median_condo_psf = median_or_none([r["psf"] for r in new_condo])
+    hdb_price_change_pct = None if first_run else pct_change(median_hdb_price, prev_summary.get("median_hdb_price"))
+    condo_psf_change_pct = None if first_run else pct_change(median_condo_psf, prev_summary.get("median_condo_psf"))
+
     out = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "week_label": week_label_now(),
@@ -264,12 +362,20 @@ def main():
         "hdb": {
             "new_count": len(new_hdb),
             "top": top_by_price(new_hdb),
+            "top_psf": top_by_psf(new_hdb),
+            "cheapest": cheapest_by_price(new_hdb),
             "busiest_town": busiest_town,
+            "type_breakdown": breakdown(new_hdb, "type"),
+            "median_price": median_hdb_price,
+            "median_price_change_pct": hdb_price_change_pct,
         },
         "private": {
             "new_count": len(new_priv),
             "top_condo": top_by_price(new_condo),
             "top_landed": top_by_price(new_landed),
+            "sale_type_breakdown": breakdown(new_priv, "sale_type"),
+            "median_condo_psf": median_condo_psf,
+            "median_condo_psf_change_pct": condo_psf_change_pct,
         },
     }
 
@@ -287,6 +393,12 @@ def main():
         combined_counts[k] = combined_counts.get(k, 0) + v
     save_seen(combined_counts)
     say("Saved %d fingerprints for next week's comparison" % len(combined_counts))
+
+    # This run's medians become next week's "old" number to compare against - saved even when
+    # they're None (first run, or a week with zero qualifying sales), since load_summary().get(...)
+    # already treats a missing/None value as "no comparable week yet" the same way either way.
+    save_summary({"median_hdb_price": median_hdb_price, "median_condo_psf": median_condo_psf})
+    say("Saved this week's median price/psf for next week's comparison")
 
 
 if __name__ == "__main__":
