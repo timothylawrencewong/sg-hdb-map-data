@@ -1,44 +1,35 @@
 #!/usr/bin/env python3
 """
-Miji Weekly Market Update: works out what's genuinely NEW in the HDB and private-property data
-since last week's run, and writes index_data/weekly_highlights.json - the numbers behind the
-/market-update page and the weekly buyer email.
+Miji Weekly Market Update: publishes this MONTH's HDB and private-property highlights - the
+highest sales, which town had the most resales, how many transactions came through - refreshed
+every Monday, and writes index_data/weekly_highlights.json (the numbers behind the
+/market-update page).
 
-Why this is its own script, separate from miji_index_build.py's monthly run:
-  Your main data pipeline (sg_build.py -> ura_build.py -> miji_index_build.py) only runs once a
-  month (see refresh-data.yml). A weekly feature hooked into that would show the exact same
-  numbers for weeks at a stretch, which reads as broken, not "weekly." So this is a second, much
-  lighter job (see weekly-highlights.yml) that runs every week on its own. It does a fresh HDB +
-  URA pull but skips OneMap geocoding entirely - this only needs prices and counts, not map
-  positions - so it's fast enough to run weekly.
-
-Why "new" isn't simply "the last 7 days":
-  Neither data source tags a sale with the day it happened. HDB's dataset only says which MONTH a
-  resale was registered in; URA's private-property feed only says which MONTH a caveat/sale was
-  lodged in (its "contractDate" field is "MMYY", month + year only). So there is no exact-date
-  field to filter by. What both sources DO give you is new rows appearing in the data over time -
-  HDB updates daily, URA twice a week (Tuesday and Friday evenings, per URA's own coverage notes).
-  So this script keeps a small fingerprint of every transaction it has already counted
-  (weekly_state/weekly_seen.json) and, each run, works out which fingerprints are showing up for
-  the FIRST time - genuinely new to the data this week, even if the underlying sale was registered
-  a little earlier. That's also why the page/email should say "newly added to the data this
-  week," not "sold this week" - it's the honest framing for what this data actually is.
-  A second, much smaller state file (weekly_state/weekly_summary.json) remembers just last week's
-  median HDB price and median condo $psf, so this run can say whether those moved up or down versus
-  last week - everything else in this script only needs weekly_seen.json.
+Why "weekly" but the content is a month, not a week-over-week diff:
+  An earlier version of this script tried to work out what was genuinely NEW in the data since
+  last Monday's run (keeping a fingerprint of every transaction already counted, comparing
+  against it each week). In practice that produced a page that was empty or near-empty most
+  weeks: HDB's dataset only says which MONTH a resale was registered in (no exact date), URA's
+  private-property feed is the same (its "contractDate" field is "MMYY"), and registration itself
+  lags the actual sale - so a genuine week-to-week diff on this data just doesn't move much,
+  which read as broken, not "quiet." Simpler and more honest: every Monday, ask "what does the
+  CURRENT month's data look like" and republish that - always something real to show, always
+  clearly labelled with the month it's from, no diffing, no state to keep between runs.
   Sources: data.gov.sg's page for the HDB resale dataset (updated daily, organised by
   registration date) and URA's REALIS "Coverage and Methodology" page (caveats transmitted twice
   weekly; new-sale/developer data released every Friday).
+
+Why no median price section:
+  A single median swings with whatever mix of flat types/sizes happened to transact that month -
+  not a controlled price index, and different houses have different values, so a week-to-week (or
+  month-to-month) median comparison reads as more rigorous than the data supports. For genuine
+  price-trend tracking, Miji Index is the right tool (a proper longer-run view) - this page only
+  ever claims to be a snapshot of the current month's activity.
 
 Reuses miji_index_build.py's HDB download/CSV parsing and ura_build.py's URA download/tidy-up -
 so this never re-implements those, and never drifts from how the rest of the site defines a flat
 type, a "condo" vs "landed" split, or a town's spelling. Both files need to sit right next to this
 one (same repo checkout) - the GitHub Action already does that.
-
-FIRST RUN NOTE: the very first time this runs, there is no "last week" to compare against, so
-everything currently in the data would look "new" - which would be a wrong, inflated first email.
-Instead, the first run only saves today's fingerprints as the starting point and reports zero
-highlights (with a clear note in the output). The following run is the first with real numbers.
 
 How to run (Terminal), from the folder that holds this file, miji_index_build.py and
 ura_build.py:
@@ -48,7 +39,6 @@ Standard library only, nothing to install.
 
 import json
 import os
-import statistics
 import sys
 import time
 from collections import Counter
@@ -57,22 +47,14 @@ import miji_index_build as midx
 import ura_build as ura
 
 OUT_DIR = "index_data"
-STATE_DIR = "weekly_state"
-SEEN_PATH = os.path.join(STATE_DIR, "weekly_seen.json")
-SUMMARY_PATH = os.path.join(STATE_DIR, "weekly_summary.json")   # last week's median price/psf, for
-                                                                  # the week-over-week change shown
-                                                                  # alongside this week's numbers -
-                                                                  # separate from weekly_seen.json
-                                                                  # (that one's a fingerprint list,
-                                                                  # this one's just two numbers)
 
 # URA's own typeOfSale codes (confirmed on URA's PMI_Resi_Transaction API reference: 1=New Sale,
 # 2=Sub Sale, 3=Resale - not something this codebase mapped before, so this is the first place it's
 # spelled out).
 SALE_TYPE_MAP = {1: "New Sale", 2: "Sub Sale", 3: "Resale"}
-LOOKBACK_MONTHS = 6   # how far back a transaction can be and still count as "new" the first time
-                       # it's seen - generous enough to cover HDB's registration lag and any
-                       # late-appearing URA caveat, without keeping fingerprints forever
+LOOKBACK_MONTHS = 6   # how far back to pull, so there's a safety margin of prior months in case the
+                       # very latest one is still thin - the script always shows just the single
+                       # most-recent month present, this is only how far back it looks for that
 TOP_N = 5
 MIN_HDB_ROWS = 500     # a sane floor for "6 months of nationwide HDB resales" - well under the
                        # real number, just enough to catch a badly broken/partial download
@@ -89,52 +71,6 @@ def month_cutoff_ym():
     now = time.gmtime()
     y, m = midx.add_months(now.tm_year, now.tm_mon, -(LOOKBACK_MONTHS - 1))
     return y * 100 + m
-
-
-def load_seen():
-    if not os.path.exists(SEEN_PATH):
-        return None   # None (not {}) specifically means "no baseline yet - this is the first run"
-    try:
-        with open(SEEN_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def save_seen(counts):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(SEEN_PATH, "w", encoding="utf-8") as f:
-        json.dump(counts, f, separators=(",", ":"))
-
-
-def load_summary():
-    if not os.path.exists(SUMMARY_PATH):
-        return {}
-    try:
-        with open(SUMMARY_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_summary(summary):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(summary, f, separators=(",", ":"))
-
-
-def median_or_none(vals):
-    vals = [v for v in vals if v]
-    return round(statistics.median(vals), 1) if vals else None
-
-
-def pct_change(new_val, old_val):
-    """None unless BOTH weeks have a real, positive number to compare - a 0 or missing old value
-    would make a percentage change either divide-by-zero or meaningless (not "infinity percent up",
-    just "no comparable week yet")."""
-    if new_val is None or old_val is None or not old_val:
-        return None
-    return round((new_val - old_val) / old_val * 100, 1)
 
 
 def breakdown(rows, field, labels=None):
@@ -159,6 +95,18 @@ def psf(price, sqm):
     return round(price / (sqm * SQM_TO_SQFT), 1)
 
 
+def median_or_none(vals):
+    """Still used for the region mini-grid's per-region median $psf (a per-region breakdown, not a
+    single overall figure claiming to represent the whole market - that's the part that was removed)."""
+    vals = [v for v in vals if v]
+    if not vals:
+        return None
+    vals = sorted(vals)
+    n = len(vals)
+    mid = n // 2
+    return round(vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2, 1)
+
+
 def region_breakdown(rows):
     """Median $psf and count per CCR/RCR/OCR, for NON-LANDED private rows only (a "seg" tag doesn't
     apply the same way to landed) - skips a region entirely if there were no qualifying rows,
@@ -176,36 +124,28 @@ def region_breakdown(rows):
     return out
 
 
-def build_signals(new_hdb, above_1m_count, type_bd, sale_bd, region_bd, first_run,
-                   hdb_fallback_label=None, priv_fallback_label=None):
+def build_signals(month_hdb, above_1m_count, type_bd, sale_bd, region_bd, hdb_month_label, priv_month_label):
     """A handful of short, auto-written one-liners that call out whatever's actually notable in
-    this week's numbers - not an opinion on whether that's good or bad, just what stands out.
-    Returns [] on the first run (nothing genuinely "this week" to point at yet) and skips any
-    signal whose underlying data is empty, rather than forcing a hollow line.
-    hdb_fallback_label / priv_fallback_label: set (to e.g. "Sep 2026") when new_hdb/new_priv is
-    actually latest_month_rows() fallback data rather than a genuine this-week diff - swaps the
-    wording so a signal never claims fallback data happened "this week"."""
-    if first_run or not new_hdb:
+    the current month's numbers - not an opinion on whether that's good or bad, just what stands
+    out. Skips any signal whose underlying data is empty, rather than forcing a hollow line."""
+    if not month_hdb:
         return []
-    hdb_when = ("in %s (the newest HDB data on file)" % hdb_fallback_label) if hdb_fallback_label else "this week"
-    hdb_poss = ("%s's" % hdb_fallback_label) if hdb_fallback_label else "this week's"
-    priv_poss = ("%s's" % priv_fallback_label) if priv_fallback_label else "this week's"
     signals = []
     if above_1m_count:
-        signals.append("%d HDB resale flat%s crossed $1M %s." % (
-            above_1m_count, "" if above_1m_count == 1 else "s", hdb_when))
+        signals.append("%d HDB resale flat%s crossed $1M in %s." % (
+            above_1m_count, "" if above_1m_count == 1 else "s", hdb_month_label))
     if type_bd:
         top = type_bd[0]
-        signals.append("%s flats made up %s%% of %s HDB resales." % (top["label"], top["pct"], hdb_poss))
-    if sale_bd:
+        signals.append("%s flats made up %s%% of %s's HDB resales." % (top["label"], top["pct"], hdb_month_label))
+    if sale_bd and priv_month_label:
         top = sale_bd[0]
-        signals.append("%s made up %s%% of %s private transactions." % (top["label"], top["pct"], priv_poss))
-    if region_bd and len(region_bd) > 1:
+        signals.append("%s made up %s%% of %s's private transactions." % (top["label"], top["pct"], priv_month_label))
+    if region_bd and len(region_bd) > 1 and priv_month_label:
         top = max(region_bd, key=lambda r: r["count"])
         total = sum(r["count"] for r in region_bd)
         if total:
-            signals.append("%s accounted for %s%% of %s non-landed private transactions." % (
-                top["seg"], round(top["count"] / total * 100, 1), priv_poss))
+            signals.append("%s accounted for %s%% of %s's non-landed private transactions." % (
+                top["seg"], round(top["count"] / total * 100, 1), priv_month_label))
     return signals[:4]
 
 
@@ -236,7 +176,6 @@ def hdb_rows(cutoff_ym):
         blk = (row.get("block") or "").strip()
         st = (row.get("street_name") or "").strip()
         rows.append({
-            "key": "H|%s|%s|%s|%s|%d|%d|%.1f" % (town, blk, st.upper(), ft, ym, int(price), area),
             "town": town,
             "type": ft,
             "blk": blk,
@@ -280,9 +219,6 @@ def private_rows(cutoff_ym):
             except (TypeError, ValueError):
                 sale_code = 0
             rows.append({
-                "key": "P|%s|%s|%d|%d|%.1f|%s|%s" % (
-                    name.upper(), street.upper(), ym, int(price), area, floor, ptype.upper(),
-                ),
                 "project": name,
                 "street": street,
                 "seg": seg if seg in ("CCR", "RCR", "OCR") else "",
@@ -303,32 +239,8 @@ def private_rows(cutoff_ym):
     return rows
 
 
-# ------------------------------------------------------------------ diff against last week
-def new_only(rows, seen):
-    """Counts how many of each fingerprint have shown up before, and only keeps rows in excess of
-    that - so if 3 identical-looking sales (same block, same price, same month - it happens) were
-    already counted before and a 4th one appears this week, only that 4th one counts as new.
-    `seen` is a plain dict {key: count} of the LAST saved baseline (or {} if there is one but this
-    key wasn't in it yet)."""
-    counts = Counter(r["key"] for r in rows)
-    new = []
-    remaining = dict(counts)
-    for r in rows:
-        key = r["key"]
-        if remaining[key] > seen.get(key, 0):
-            new.append(r)
-            remaining[key] -= 1   # so identical-key rows are only "claimed" once each
-    return new, counts
-
-
-def _strip_key(rows):
-    return [{k: v for k, v in r.items() if k != "key"} for r in rows]
-
-
 def top_by_price(rows, n=TOP_N):
-    """Top N by price, with the internal dedup "key" fingerprint stripped out - that's plumbing
-    for this script's own week-to-week comparison, not something the page or email should show."""
-    return _strip_key(sorted(rows, key=lambda r: -r["price"])[:n])
+    return sorted(rows, key=lambda r: -r["price"])[:n]
 
 
 def cheapest_by_price(rows):
@@ -336,22 +248,16 @@ def cheapest_by_price(rows):
     stat here leads with "highest," this is the one that speaks to a budget-conscious buyer."""
     if not rows:
         return None
-    return _strip_key([min(rows, key=lambda r: r["price"])])[0]
+    return min(rows, key=lambda r: r["price"])
 
 
 def top_by_psf(rows, n=TOP_N):
     """Same idea as top_by_price but ranked by $ per square foot - a small unit in a hot area can
-    have a striking $psf even when its total price isn't the week's biggest number, which is
+    have a striking $psf even when its total price isn't the month's biggest number, which is
     genuinely different information from "highest price." Rows with no psf (shouldn't happen, but
     defensive) are left out rather than sorting as if they were $0/sqft."""
     ranked = [r for r in rows if r.get("psf")]
-    return _strip_key(sorted(ranked, key=lambda r: -r["psf"])[:n])
-
-
-def week_label_now():
-    week_end = time.gmtime()
-    week_start = time.gmtime(time.mktime(week_end) - 6 * 86400)
-    return "%s – %s" % (time.strftime("%d %b", week_start), time.strftime("%d %b %Y", week_end))
+    return sorted(ranked, key=lambda r: -r["psf"])[:n]
 
 
 _MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -369,13 +275,9 @@ def ym_label(ym):
 
 
 def latest_month_rows(rows):
-    """Fallback for a run where new_only() comes back empty (real and expected early in this
-    feature's life, or just a quiet week for one side of the market): instead of leaving that
-    section of the page blank, fall back to whichever single month is the MOST RECENT one present
-    in the full lookback window - i.e. "the newest data we actually have" - honestly labelled as
-    that rather than dressed up as "new this week" (build_signals and weekly_highlights.json both
-    carry a used_fallback flag + the month label so the page/email can say so plainly).
-    Returns (rows_for_latest_month, ym) - ([], None) if `rows` is empty."""
+    """The core selection this whole script runs on: out of everything pulled, keep only the
+    single most-recent month actually present. Returns (rows_for_latest_month, ym) - ([], None) if
+    `rows` is empty."""
     if not rows:
         return [], None
     latest_ym = max(r["ym"] for r in rows)
@@ -386,126 +288,63 @@ def main():
     say("Weekly market update builder | Python %s | %s" % (sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M")))
     os.makedirs(OUT_DIR, exist_ok=True)
     cutoff_ym = month_cutoff_ym()
-    seen = load_seen()
-    first_run = seen is None
-    if first_run:
-        say("NOTE: no saved baseline from a previous run (weekly_state/weekly_seen.json doesn't "
-            "exist yet) - this is the FIRST run. Saving today's data as the starting point only; "
-            "everything currently in the data is NOT reported as 'new this week' (it isn't - we "
-            "have nothing earlier to compare it to). Next week's run will be the first with real "
-            "highlights.")
-        seen = {}
 
-    hdb = hdb_rows(cutoff_ym)
-    if len(hdb) < MIN_HDB_ROWS:
+    hdb_all = hdb_rows(cutoff_ym)
+    if len(hdb_all) < MIN_HDB_ROWS:
         raise SystemExit("STOP: only %d HDB rows in the last %d months (expected several thousand). "
-                          "The HDB download may be incomplete - nothing was changed." % (len(hdb), LOOKBACK_MONTHS))
-    new_hdb, hdb_counts = new_only(hdb, seen)
-    say("   %d HDB rows are new since last run" % len(new_hdb))
+                          "The HDB download may be incomplete - nothing was changed." % (len(hdb_all), LOOKBACK_MONTHS))
+    month_hdb, hdb_ym = latest_month_rows(hdb_all)
+    hdb_month_label = ym_label(hdb_ym)
+    say("   %d HDB rows for %s" % (len(month_hdb), hdb_month_label))
 
-    priv, priv_counts, new_priv = [], {}, []
+    priv_all, month_priv, priv_ym = [], [], None
+    priv_month_label = None
     try:
-        priv = private_rows(cutoff_ym)
-        new_priv, priv_counts = new_only(priv, seen)
-        say("   %d private-property rows are new since last run" % len(new_priv))
+        priv_all = private_rows(cutoff_ym)
+        month_priv, priv_ym = latest_month_rows(priv_all)
+        priv_month_label = ym_label(priv_ym)
+        say("   %d private-property rows for %s" % (len(month_priv), priv_month_label))
     except SystemExit as e:
         say("NOTE: private-property side skipped this run (%s) - HDB highlights are unaffected." % e)
     except Exception as e:
         say("NOTE: private-property side skipped this run (%s: %s) - HDB highlights are unaffected." % (type(e).__name__, e))
 
-    if first_run:
-        new_hdb, new_priv = [], []
-
-    # Fallback: a run that's NOT the first one can still come back with a genuinely empty diff (this
-    # feature is only a couple of weeks old, so "nothing new since last Monday" is a real possible
-    # state, not a bug) - rather than publish an empty page/email two weeks running, fall back to
-    # whichever month is the most recently registered one Miji actually has on file, honestly
-    # labelled as that (not "new this week") via *_used_fallback / *_fallback_label below, which
-    # flow into weekly_highlights.json and from there into market-update.html's own notice banner.
-    # HDB and private property are judged independently, since one side coming up empty doesn't mean
-    # the other did too.
-    hdb_used_fallback = False
-    hdb_fallback_label = None
-    if not first_run and not new_hdb and hdb:
-        new_hdb, fallback_ym = latest_month_rows(hdb)
-        hdb_fallback_label = ym_label(fallback_ym)
-        hdb_used_fallback = bool(new_hdb)
-        if hdb_used_fallback:
-            say("   Nothing new in HDB data since last run - falling back to the most recently "
-                "registered month on file (%s, %d rows)." % (hdb_fallback_label, len(new_hdb)))
-
-    priv_used_fallback = False
-    priv_fallback_label = None
-    if not first_run and not new_priv and priv:
-        new_priv, fallback_ym = latest_month_rows(priv)
-        priv_fallback_label = ym_label(fallback_ym)
-        priv_used_fallback = bool(new_priv)
-        if priv_used_fallback:
-            say("   Nothing new in private-property data since last run - falling back to the most "
-                "recently registered month on file (%s, %d rows)." % (priv_fallback_label, len(new_priv)))
-
-    town_counts = Counter(r["town"] for r in new_hdb)
+    town_counts = Counter(r["town"] for r in month_hdb)
     busiest_town = None
     if town_counts:
         town, count = town_counts.most_common(1)[0]
         busiest_town = {"town": town, "count": count}
 
-    new_condo = [r for r in new_priv if r["type"] == "condo"]
-    new_landed = [r for r in new_priv if r["type"] == "landed"]
-    above_1m_count = sum(1 for r in new_hdb if r["price"] >= MILLION)
-    hdb_type_bd = breakdown(new_hdb, "type")
-    priv_sale_bd = breakdown(new_priv, "sale_type")
-    priv_region_bd = region_breakdown(new_condo)
+    month_condo = [r for r in month_priv if r["type"] == "condo"]
+    month_landed = [r for r in month_priv if r["type"] == "landed"]
+    above_1m_count = sum(1 for r in month_hdb if r["price"] >= MILLION)
+    hdb_type_bd = breakdown(month_hdb, "type")
+    priv_sale_bd = breakdown(month_priv, "sale_type")
+    priv_region_bd = region_breakdown(month_condo)
 
-    # Week-over-week price movement. Compared against LAST week's "new this week" median, not
-    # against the whole 6-month window - so this is genuinely "how this week's activity compares to
-    # last week's," not a slow-moving long-run average. Like every other "new this week" number,
-    # there's nothing to compare on the first run OR the run right after it (that run's own median
-    # becomes the very first baseline) - the third run is the first with a real percentage.
-    #
-    # Deliberately NOT tracking a multi-week trend here (an earlier version of this script did) -
-    # a week-to-week median swings with whatever mix of flats happened to transact, not with actual
-    # price movement, so stringing several of those together and putting a percentage on it reads
-    # as more rigorous than the data supports. For genuine market direction, Miji Index is the right
-    # tool (a proper longer-run view) - this script only ever claims to be a snapshot of this week.
-    prev_summary = load_summary()
-    week_label = week_label_now()
-    median_hdb_price = median_or_none([r["price"] for r in new_hdb])
-    median_condo_psf = median_or_none([r["psf"] for r in new_condo])
-    hdb_price_change_pct = None if first_run else pct_change(median_hdb_price, prev_summary.get("median_hdb_price"))
-    condo_psf_change_pct = None if first_run else pct_change(median_condo_psf, prev_summary.get("median_condo_psf"))
-
-    signals = build_signals(new_hdb, above_1m_count, hdb_type_bd, priv_sale_bd, priv_region_bd, first_run,
-                             hdb_fallback_label=hdb_fallback_label, priv_fallback_label=priv_fallback_label)
+    signals = build_signals(month_hdb, above_1m_count, hdb_type_bd, priv_sale_bd, priv_region_bd,
+                             hdb_month_label, priv_month_label)
 
     out = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "week_label": week_label,
-        "first_run": first_run,
+        "hdb_month_label": hdb_month_label,
+        "priv_month_label": priv_month_label,
         "signals": signals,
         "hdb": {
-            "new_count": len(new_hdb),
-            "top": top_by_price(new_hdb),
-            "top_psf": top_by_psf(new_hdb),
-            "cheapest": cheapest_by_price(new_hdb),
+            "count": len(month_hdb),
+            "top": top_by_price(month_hdb),
+            "top_psf": top_by_psf(month_hdb),
+            "cheapest": cheapest_by_price(month_hdb),
             "busiest_town": busiest_town,
             "type_breakdown": hdb_type_bd,
-            "median_price": median_hdb_price,
-            "median_price_change_pct": hdb_price_change_pct,
             "above_1m_count": above_1m_count,
-            "used_fallback": hdb_used_fallback,
-            "fallback_label": hdb_fallback_label,
         },
         "private": {
-            "new_count": len(new_priv),
-            "top_condo": top_by_price(new_condo),
-            "top_landed": top_by_price(new_landed),
+            "count": len(month_priv),
+            "top_condo": top_by_price(month_condo),
+            "top_landed": top_by_price(month_landed),
             "sale_type_breakdown": priv_sale_bd,
-            "median_condo_psf": median_condo_psf,
-            "median_condo_psf_change_pct": condo_psf_change_pct,
             "region_breakdown": priv_region_bd,
-            "used_fallback": priv_used_fallback,
-            "fallback_label": priv_fallback_label,
         },
     }
 
@@ -513,22 +352,6 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
     say("Wrote %s" % path)
-
-    # Always save the FULL current-run counts as the new baseline (not just the new ones) - next
-    # week's diff is simply "this run's counts minus this saved baseline". Rows that age out of the
-    # LOOKBACK_MONTHS window naturally drop out of next run's counts too, so this file never grows
-    # without bound.
-    combined_counts = dict(hdb_counts)
-    for k, v in priv_counts.items():
-        combined_counts[k] = combined_counts.get(k, 0) + v
-    save_seen(combined_counts)
-    say("Saved %d fingerprints for next week's comparison" % len(combined_counts))
-
-    # This run's medians become next week's "old" number to compare against - saved even when
-    # they're None (first run, or a week with zero qualifying sales), since load_summary().get(...)
-    # already treats a missing/None value as "no comparable week yet" the same way either way.
-    save_summary({"median_hdb_price": median_hdb_price, "median_condo_psf": median_condo_psf})
-    say("Saved this week's median price/psf for next week's comparison")
 
 
 if __name__ == "__main__":
