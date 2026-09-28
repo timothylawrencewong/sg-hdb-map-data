@@ -176,29 +176,36 @@ def region_breakdown(rows):
     return out
 
 
-def build_signals(new_hdb, above_1m_count, type_bd, sale_bd, region_bd, first_run):
+def build_signals(new_hdb, above_1m_count, type_bd, sale_bd, region_bd, first_run,
+                   hdb_fallback_label=None, priv_fallback_label=None):
     """A handful of short, auto-written one-liners that call out whatever's actually notable in
     this week's numbers - not an opinion on whether that's good or bad, just what stands out.
     Returns [] on the first run (nothing genuinely "this week" to point at yet) and skips any
-    signal whose underlying data is empty, rather than forcing a hollow line."""
+    signal whose underlying data is empty, rather than forcing a hollow line.
+    hdb_fallback_label / priv_fallback_label: set (to e.g. "Sep 2026") when new_hdb/new_priv is
+    actually latest_month_rows() fallback data rather than a genuine this-week diff - swaps the
+    wording so a signal never claims fallback data happened "this week"."""
     if first_run or not new_hdb:
         return []
+    hdb_when = ("in %s (the newest HDB data on file)" % hdb_fallback_label) if hdb_fallback_label else "this week"
+    hdb_poss = ("%s's" % hdb_fallback_label) if hdb_fallback_label else "this week's"
+    priv_poss = ("%s's" % priv_fallback_label) if priv_fallback_label else "this week's"
     signals = []
     if above_1m_count:
-        signals.append("%d HDB resale flat%s crossed $1M this week." % (
-            above_1m_count, "" if above_1m_count == 1 else "s"))
+        signals.append("%d HDB resale flat%s crossed $1M %s." % (
+            above_1m_count, "" if above_1m_count == 1 else "s", hdb_when))
     if type_bd:
         top = type_bd[0]
-        signals.append("%s flats made up %s%% of this week's HDB resales." % (top["label"], top["pct"]))
+        signals.append("%s flats made up %s%% of %s HDB resales." % (top["label"], top["pct"], hdb_poss))
     if sale_bd:
         top = sale_bd[0]
-        signals.append("%s made up %s%% of this week's private transactions." % (top["label"], top["pct"]))
+        signals.append("%s made up %s%% of %s private transactions." % (top["label"], top["pct"], priv_poss))
     if region_bd and len(region_bd) > 1:
         top = max(region_bd, key=lambda r: r["count"])
         total = sum(r["count"] for r in region_bd)
         if total:
-            signals.append("%s accounted for %s%% of this week's non-landed private transactions." % (
-                top["seg"], round(top["count"] / total * 100, 1)))
+            signals.append("%s accounted for %s%% of %s non-landed private transactions." % (
+                top["seg"], round(top["count"] / total * 100, 1), priv_poss))
     return signals[:4]
 
 
@@ -347,6 +354,34 @@ def week_label_now():
     return "%s – %s" % (time.strftime("%d %b", week_start), time.strftime("%d %b %Y", week_end))
 
 
+_MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def ym_label(ym):
+    """220509 -> "Sep 2022"-style label for a YYYYMM int. None in, None out."""
+    if not ym:
+        return None
+    year, mon = divmod(ym, 100)
+    if mon < 1 or mon > 12:
+        return None
+    return "%s %d" % (_MONTH_NAMES[mon], year)
+
+
+def latest_month_rows(rows):
+    """Fallback for a run where new_only() comes back empty (real and expected early in this
+    feature's life, or just a quiet week for one side of the market): instead of leaving that
+    section of the page blank, fall back to whichever single month is the MOST RECENT one present
+    in the full lookback window - i.e. "the newest data we actually have" - honestly labelled as
+    that rather than dressed up as "new this week" (build_signals and weekly_highlights.json both
+    carry a used_fallback flag + the month label so the page/email can say so plainly).
+    Returns (rows_for_latest_month, ym) - ([], None) if `rows` is empty."""
+    if not rows:
+        return [], None
+    latest_ym = max(r["ym"] for r in rows)
+    return [r for r in rows if r["ym"] == latest_ym], latest_ym
+
+
 def main():
     say("Weekly market update builder | Python %s | %s" % (sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M")))
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -381,6 +416,34 @@ def main():
     if first_run:
         new_hdb, new_priv = [], []
 
+    # Fallback: a run that's NOT the first one can still come back with a genuinely empty diff (this
+    # feature is only a couple of weeks old, so "nothing new since last Monday" is a real possible
+    # state, not a bug) - rather than publish an empty page/email two weeks running, fall back to
+    # whichever month is the most recently registered one Miji actually has on file, honestly
+    # labelled as that (not "new this week") via *_used_fallback / *_fallback_label below, which
+    # flow into weekly_highlights.json and from there into market-update.html's own notice banner.
+    # HDB and private property are judged independently, since one side coming up empty doesn't mean
+    # the other did too.
+    hdb_used_fallback = False
+    hdb_fallback_label = None
+    if not first_run and not new_hdb and hdb:
+        new_hdb, fallback_ym = latest_month_rows(hdb)
+        hdb_fallback_label = ym_label(fallback_ym)
+        hdb_used_fallback = bool(new_hdb)
+        if hdb_used_fallback:
+            say("   Nothing new in HDB data since last run - falling back to the most recently "
+                "registered month on file (%s, %d rows)." % (hdb_fallback_label, len(new_hdb)))
+
+    priv_used_fallback = False
+    priv_fallback_label = None
+    if not first_run and not new_priv and priv:
+        new_priv, fallback_ym = latest_month_rows(priv)
+        priv_fallback_label = ym_label(fallback_ym)
+        priv_used_fallback = bool(new_priv)
+        if priv_used_fallback:
+            say("   Nothing new in private-property data since last run - falling back to the most "
+                "recently registered month on file (%s, %d rows)." % (priv_fallback_label, len(new_priv)))
+
     town_counts = Counter(r["town"] for r in new_hdb)
     busiest_town = None
     if town_counts:
@@ -412,7 +475,8 @@ def main():
     hdb_price_change_pct = None if first_run else pct_change(median_hdb_price, prev_summary.get("median_hdb_price"))
     condo_psf_change_pct = None if first_run else pct_change(median_condo_psf, prev_summary.get("median_condo_psf"))
 
-    signals = build_signals(new_hdb, above_1m_count, hdb_type_bd, priv_sale_bd, priv_region_bd, first_run)
+    signals = build_signals(new_hdb, above_1m_count, hdb_type_bd, priv_sale_bd, priv_region_bd, first_run,
+                             hdb_fallback_label=hdb_fallback_label, priv_fallback_label=priv_fallback_label)
 
     out = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -429,6 +493,8 @@ def main():
             "median_price": median_hdb_price,
             "median_price_change_pct": hdb_price_change_pct,
             "above_1m_count": above_1m_count,
+            "used_fallback": hdb_used_fallback,
+            "fallback_label": hdb_fallback_label,
         },
         "private": {
             "new_count": len(new_priv),
@@ -438,6 +504,8 @@ def main():
             "median_condo_psf": median_condo_psf,
             "median_condo_psf_change_pct": condo_psf_change_pct,
             "region_breakdown": priv_region_bd,
+            "used_fallback": priv_used_fallback,
+            "fallback_label": priv_fallback_label,
         },
     }
 
