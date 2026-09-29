@@ -54,11 +54,15 @@ from collections import defaultdict
 
 # ------------------------------------------------------------------ settings
 HDB_DATASET_ID = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"  # "Resale flat prices ... from Jan-2017 onwards"
+HDB_PROPERTY_INFO_DATASET_ID = "d_17f5382f26140b1fdae0ba2ef6239d2f"  # "HDB Property Information" -
+# EVERY HDB block that exists (~13.4K rows, updated quarterly), not just ones with a recent
+# resale - feeds the agent listing form's complete address directory, see build_hdb_directory().
 API_BASE = "https://api-open.data.gov.sg/v1/public/api/datasets/%s/poll-download"
 OUT_DIR = "index_data"
 PRIVATE_DIR = "private_data"
 CACHE_DIR = "index_cache"
 CACHE_HOURS = 20   # the HDB dataset updates daily; no need to re-download more than once a day
+PROPERTY_INFO_CACHE_HOURS = 24 * 30   # this one only updates quarterly - no need to refetch often
 SQM_TO_SQFT = 10.7639  # matches ura_build.py
 
 _NOW_YEAR = time.gmtime().tm_year
@@ -211,6 +215,61 @@ def parse_csv_rows(path):
     import csv
     with open(path, "r", encoding="utf-8", newline="") as f:
         yield from csv.DictReader(f)
+
+
+def property_info_cache_path():
+    return os.path.join(CACHE_DIR, "hdb_property_info.csv")
+
+
+def download_hdb_property_info_csv():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = property_info_cache_path()
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < PROPERTY_INFO_CACHE_HOURS * 3600:
+        say("Using the HDB Property Information copy saved earlier (%s)" % path)
+        return path
+    say("Asking data.gov.sg for the HDB Property Information download link...")
+    d = get_json(API_BASE % HDB_PROPERTY_INFO_DATASET_ID, label="HDB Property Information poll-download")
+    url = ((d.get("data") or {}).get("url") or "")
+    if not url:
+        raise SystemExit("data.gov.sg did not give a download link for HDB Property Information: %r" % d)
+    say("Downloading the complete HDB block directory (every block, updated quarterly by HDB)...")
+    raw = http_get(url, timeout=120)
+    with open(path, "wb") as f:
+        f.write(raw)
+    say("   saved %.1f MB" % (len(raw) / 1e6))
+    return path
+
+
+def build_hdb_directory():
+    """EVERY residential HDB block that currently exists - not filtered to recent resale activity
+    the way recent_transactions.json (and the address suggestions built from it) used to be. Feeds
+    the agent listing form's address directory (hdb_directory.json) so a block that just hasn't
+    sold in the last several months (e.g. 542 Jelapang Rd) is still searchable and geocodable -
+    previously it would silently be missing from suggestions with no way to tell why. Non-
+    residential rows (standalone multistorey carparks, market/hawker buildings, etc. - this
+    dataset includes those too) are skipped; an agent is never listing one of those."""
+    path = download_hdb_property_info_csv()
+    say("Building the complete HDB block directory...")
+    seen = {}
+    out = []
+    skipped_non_residential = 0
+    for row in parse_csv_rows(path):
+        if (row.get("residential") or "").strip().upper() != "Y":
+            skipped_non_residential += 1
+            continue
+        blk = (row.get("blk_no") or "").strip()
+        st = (row.get("street") or "").strip().title()
+        town = (row.get("bldg_contract_town") or "").strip().title().replace("Hdb", "HDB")
+        if not blk or not st:
+            continue
+        key = (blk + "|" + st).lower()
+        if key in seen:
+            continue
+        seen[key] = True
+        out.append({"blk": blk, "st": st, "town": town})
+    say("   %d residential HDB blocks in the directory (%d non-residential rows skipped)"
+        % (len(out), skipped_non_residential))
+    return out
 
 
 def build_hdb_medians(ttm_months):
@@ -602,6 +661,234 @@ def build_private_project_history():
     return out
 
 
+# ------------------------------------------------------------------ nearby amenities (data.gov.sg)
+# Feeds the "X min walk to Y" lines on a listing's detail page - not just MRT, but the other
+# things buyers actually ask about (hawker centre, park). Each category is computed here, once,
+# as a small static lookup table - NOT a live per-listing API call - because (a) these locations
+# barely ever change, so re-fetching them on every visitor's page load would be wasted work for
+# data that's stable for months at a time, and (b) it keeps the listing page down to a couple of
+# calls (geocode the address, then plain arithmetic against these files) instead of depending on
+# OneMap's newer routing/nearby-amenity endpoints, which - unlike the plain address search this
+# site already uses - require an OneMap account and an auth token that would have to sit in
+# public front-end code. A straight-line ("as the crow flies") distance is what's used, same
+# convention URA/HDB themselves use for walking-distance estimates (roughly 80m per minute of
+# walking) - it can be a little off from the actual walking route around a building, but it's
+# the same honest approximation the rest of the industry uses for this exact purpose.
+#
+# Categories are limited, on purpose, to ones with a reliable government point-location dataset
+# (name + lat/lng ready to use). Schools were considered and left out for now - MOE's directory
+# has no coordinates, only postal codes, which would mean geocoding ~350 schools one at a time
+# during every build. Malls aren't published as open government location data at all.
+# Supermarkets ARE published (NEA's List of Supermarket Licences) but, like schools, only as an
+# address/postal code - no lat/lng - so they can't go straight into a category here the way
+# MRT/hawker/park do. build_supermarket_addresses() below just parses + dedupes that list into
+# index_data/supermarket_addresses.json; miji_geocode_addresses.py (the OneMap-authenticated
+# script, run right after this one) is what actually geocodes each address and adds the
+# "supermarket" category to nearby_amenities.json - same reason HDB block geocoding lives in that
+# separate script and not here: it needs an authenticated OneMap account, so isolating it means a
+# OneMap problem can never stop this file's other outputs from updating.
+MRT_STATION_DATASET_ID = "d_8d886e3a83934d7447acdf5bc6959999"    # URA Master Plan 2019 Rail Station layer
+HAWKER_CENTRE_DATASET_ID = "d_4a086da0a5553be1d89383cd90d07ecd"  # NEA Hawker Centres
+PARK_DATASET_ID = "d_0542d48f0991541706b58059381a6eca"           # NParks Parks
+SUPERMARKET_DATASET_ID = "d_11edd0117280c5776651d7891114c88c"    # NEA List of Supermarket Licences
+AMENITY_CACHE_HOURS = 24 * 30   # these barely move month to month - no need to refetch every run
+SUPERMARKET_CACHE_HOURS = 24 * 30
+
+
+def download_geojson_dataset(dataset_id, cache_name, label):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, cache_name)
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < AMENITY_CACHE_HOURS * 3600:
+        say("Using the %s layer saved earlier (%s)" % (label, path))
+        return path
+    say("Asking data.gov.sg for the %s download link..." % label)
+    d = get_json(API_BASE % dataset_id, label="%s dataset poll-download" % label)
+    url = ((d.get("data") or {}).get("url") or "")
+    if not url:
+        raise SystemExit("data.gov.sg did not give a download link for %s: %r" % (label, d))
+    say("Downloading %s..." % label)
+    raw = http_get(url, timeout=120)
+    with open(path, "wb") as f:
+        f.write(raw)
+    say("   saved %.1f KB" % (len(raw) / 1e3))
+    return path
+
+
+def _polygon_centroid(coords):
+    """Plain average-of-vertices centroid for one polygon ring. Not area-weighted, but these are
+    small outline shapes, so the difference from a true centroid is at most a few metres - well
+    within the margin of a straight-line walking-distance estimate anyway."""
+    ring = coords[0]  # outer ring - these outlines don't have holes
+    xs = [p[0] for p in ring]
+    ys = [p[1] for p in ring]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def build_named_points(dataset_id, cache_name, label, extra_field=None, extra_key=None, extra_default=""):
+    """Returns [{name, lat, lng[, extra_key]}, ...] - one point per named feature. A name can
+    appear as several polygons/points in the source layer (interchange platforms, multiple
+    entrances) - these are merged into one point per NAME by averaging that name's positions, so
+    a bigger site doesn't quietly get more "pull" just because it has more shapes. Field names
+    are the ones data.gov.sg's own dataset page documents (NAME, plus RAIL_TYPE for the MRT
+    layer); the fallbacks and the diagnostic line below are there so a schema change on their end
+    shows up clearly in the run log instead of silently producing an empty file."""
+    path = download_geojson_dataset(dataset_id, cache_name, label)
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    features = raw.get("features") or []
+    by_name = defaultdict(list)  # name -> [(lng, lat, extra_val), ...]
+    for feat in features:
+        props = feat.get("properties") or {}
+        name = (props.get("NAME") or props.get("Name") or props.get("name")
+                or props.get("STN_NAME") or props.get("Station") or "").strip()
+        extra_val = extra_default
+        if extra_field:
+            extra_val = (props.get(extra_field) or extra_default or "").strip() or extra_default
+        geom = feat.get("geometry") or {}
+        if not name or not geom:
+            continue
+        gtype = geom.get("type")
+        if gtype == "Point":
+            coords = geom.get("coordinates") or []
+            if len(coords) >= 2:
+                by_name[name].append((coords[0], coords[1], extra_val))
+            continue
+        polys = []
+        if gtype == "Polygon":
+            polys = [geom.get("coordinates")]
+        elif gtype == "MultiPolygon":
+            polys = geom.get("coordinates") or []
+        for poly in polys:
+            try:
+                lng, lat = _polygon_centroid(poly)
+                by_name[name].append((lng, lat, extra_val))
+            except (IndexError, ZeroDivisionError, TypeError):
+                continue
+
+    if not by_name and features:
+        say("   NOTE: %s - found %d features but none had a usable NAME/geometry - the source "
+            "dataset's field names may have changed. First feature's properties: %r" %
+            (label, len(features), (features[0].get("properties") or {})))
+
+    points = []
+    for name, pts in sorted(by_name.items()):
+        lngs = [p[0] for p in pts]
+        lats = [p[1] for p in pts]
+        entry = {
+            "name": name.title() if name.isupper() else name,
+            "lat": round(sum(lats) / len(lats), 6),
+            "lng": round(sum(lngs) / len(lngs), 6),
+        }
+        if extra_field:
+            extras = sorted(set(p[2] for p in pts if p[2]))
+            entry[extra_key] = "/".join(extras) if extras else extra_default
+        points.append(entry)
+    return points
+
+
+def build_mrt_stations():
+    return build_named_points(
+        MRT_STATION_DATASET_ID, "mrt_stations_raw.geojson", "MRT/LRT station layer",
+        extra_field="RAIL_TYPE", extra_key="rail_type", extra_default="MRT",
+    )
+
+
+def build_hawker_centres():
+    return build_named_points(
+        HAWKER_CENTRE_DATASET_ID, "hawker_centres_raw.geojson", "Hawker Centres layer",
+    )
+
+
+def build_parks():
+    return build_named_points(
+        PARK_DATASET_ID, "parks_raw.geojson", "Parks layer",
+    )
+
+
+def supermarket_cache_path():
+    return os.path.join(CACHE_DIR, "supermarket_licences.csv")
+
+
+def download_supermarket_csv():
+    """NEA's List of Supermarket Licences - a CSV, unlike the GEOJSON layers above (see the NOTE
+    above SUPERMARKET_DATASET_ID for why this only gets as far as an address list here)."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = supermarket_cache_path()
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < SUPERMARKET_CACHE_HOURS * 3600:
+        say("Using the supermarket licences copy saved earlier (%s)" % path)
+        return path
+    say("Asking data.gov.sg for the supermarket licences download link...")
+    d = get_json(API_BASE % SUPERMARKET_DATASET_ID, label="Supermarket licences poll-download")
+    url = ((d.get("data") or {}).get("url") or "")
+    if not url:
+        raise SystemExit("data.gov.sg did not give a download link for supermarket licences: %r" % d)
+    say("Downloading the NEA supermarket licence list...")
+    raw = http_get(url, timeout=60)
+    with open(path, "wb") as f:
+        f.write(raw)
+    say("   saved %.1f KB" % (len(raw) / 1e3))
+    return path
+
+
+def _first_field(row_lower, candidates):
+    """Tries several plausible column-name spellings, case/spacing-insensitively - protects
+    against data.gov.sg publishing this CSV with slightly different headers than expected (same
+    defensive idea as the NAME-field fallbacks in build_named_points above)."""
+    for c in candidates:
+        v = row_lower.get(c)
+        if v:
+            return v.strip()
+    return ""
+
+
+def build_supermarket_addresses():
+    """One row per licensed supermarket premises - {name, address, postal} - deduped by address,
+    since a single unit sometimes has more than one licence record. This is as far as this file
+    takes it (see the NOTE above SUPERMARKET_DATASET_ID) - miji_geocode_addresses.py turns this
+    into actual coordinates."""
+    path = download_supermarket_csv()
+    say("Building the supermarket address list...")
+    seen = {}
+    out = []
+    skipped_missing = 0
+    skipped_dupe = 0
+    first_row_keys = None
+    for row in parse_csv_rows(path):
+        row_lower = {(k or "").strip().lower().replace(" ", "_"): (v or "") for k, v in row.items()}
+        if first_row_keys is None:
+            first_row_keys = list(row.keys())
+        name = _first_field(row_lower, ["licensee_name", "licensee", "name"])
+        building = _first_field(row_lower, ["building_name", "building"])
+        block = _first_field(row_lower, ["block_house_number", "block_house_no", "block_no", "house_blk_no", "blk_no"])
+        street = _first_field(row_lower, ["street_name", "street"])
+        postal = _first_field(row_lower, ["postal_code", "postal"])
+        if not street or not postal:
+            skipped_missing += 1
+            continue
+        address = " ".join(x for x in [block, street] if x).strip()
+        key = (address.lower(), postal)
+        if key in seen:
+            skipped_dupe += 1
+            continue
+        seen[key] = True
+        out.append({
+            "name": building or name or "Supermarket",
+            "address": address,
+            "postal": postal,
+        })
+
+    if not out:
+        raise RuntimeError(
+            "parsed 0 usable supermarket addresses (skipped %d rows with no street/postal) - the "
+            "source dataset's column names may have changed. First row's columns: %r"
+            % (skipped_missing, first_row_keys)
+        )
+    say("   %d unique supermarket addresses found (%d duplicate rows, %d rows missing "
+        "street/postal)" % (len(out), skipped_dupe, skipped_missing))
+    return out
+
+
 # ------------------------------------------------------------------ 3. combine + write
 def slots_to_entry(stats_by_slot):
     """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low}
@@ -774,6 +1061,119 @@ def main():
         say("")
         say("NOTE: block_history.json was NOT updated this run (miji_index.json and "
             "recent_transactions.json above are unaffected) - %s: %s" % (type(e).__name__, e))
+
+    # ------------------------------------------------------------------ 6. nearby amenities, for listing pages
+    # Same isolation as the two blocks above - a problem here (e.g. data.gov.sg changing one of
+    # these datasets' field names) should never take down anything already live. This one doesn't
+    # depend on the HDB/URA data above at all, so it'll keep working even if those ever fail. Each
+    # category is fetched independently too, so a problem with one (say, the parks layer) doesn't
+    # cost the other two.
+    try:
+        categories = {}
+        for key, builder, cat_label in [
+            ("mrt", build_mrt_stations, "MRT/LRT stations"),
+            ("hawker", build_hawker_centres, "hawker centres"),
+            ("park", build_parks, "parks"),
+        ]:
+            try:
+                categories[key] = builder()
+            except Exception as e:
+                say("   NOTE: %s were NOT included this run - %s: %s" % (cat_label, type(e).__name__, e))
+                categories[key] = []
+
+        if not any(categories.values()):
+            raise RuntimeError("parsed 0 amenities across every category - see the NOTEs above for what the source data looked like")
+
+        amenities_path = os.path.join(OUT_DIR, "nearby_amenities.json")
+        amenities_payload = {
+            "built": time.strftime("%Y-%m-%d"),
+            "categories": categories,
+            "sources": {
+                "mrt": "Urban Redevelopment Authority (URA), Master Plan 2019 Rail Station layer, "
+                       "via data.gov.sg. One point per MRT/LRT station (interchange platforms "
+                       "merged into a single point per station name).",
+                "hawker": "National Environment Agency (NEA), Hawker Centres, via data.gov.sg.",
+                "park": "National Parks Board (NParks), Parks, via data.gov.sg.",
+                "method": "Straight-line distance from a listing's geocoded address to the "
+                          "nearest point in each category, converted to a walking-time estimate "
+                          "at ~80m/min (the same convention URA/HDB use) - not an actual walking "
+                          "route, and not shown at all beyond a reasonable walking distance.",
+            },
+        }
+        amenities_tmp = amenities_path + ".tmp"
+        with open(amenities_tmp, "w", encoding="utf-8") as f:
+            json.dump(amenities_payload, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(amenities_tmp, amenities_path)
+        say("Done. %d MRT/LRT + %d hawker centres + %d parks written to %s" %
+            (len(categories.get("mrt", [])), len(categories.get("hawker", [])), len(categories.get("park", [])), amenities_path))
+    except Exception as e:
+        say("")
+        say("NOTE: nearby_amenities.json was NOT updated this run (everything else above is "
+            "unaffected) - %s: %s" % (type(e).__name__, e))
+
+    # ------------------------------------------------------------------ 7. complete HDB block directory, for the agent listing form's address suggestions
+    # Same isolation as the blocks above. Deliberately a SEPARATE source from recent_transactions.json
+    # (built above) - that file only has blocks with a recent resale, which was fine for Check a
+    # Unit (it only needs recently-comparable blocks) but meant a block that hadn't sold in a
+    # while was silently missing from the agent's address suggestions with no way to tell why.
+    # This is the complete list instead, independent of transaction history.
+    try:
+        directory = build_hdb_directory()
+        if len(directory) < 5000:
+            raise SystemExit("STOP: only %d residential blocks came out of HDB Property "
+                              "Information (expected 8000+) - the download may be incomplete or "
+                              "the dataset's columns may have changed. hdb_directory.json was left "
+                              "untouched." % len(directory))
+        directory_path = os.path.join(OUT_DIR, "hdb_directory.json")
+        directory_payload = {
+            "built": time.strftime("%Y-%m-%d"),
+            "blocks": directory,
+            "sources": {
+                "hdb": "Housing & Development Board (HDB), HDB Property Information, via "
+                       "data.gov.sg. Every residential HDB block that currently exists (updated "
+                       "quarterly by HDB) - not filtered to recent transactions, unlike "
+                       "recent_transactions.json above. Feeds the agent listing form's address "
+                       "suggestions so every real HDB block is searchable, whether or not it's "
+                       "sold recently.",
+            },
+        }
+        directory_tmp = directory_path + ".tmp"
+        with open(directory_tmp, "w", encoding="utf-8") as f:
+            json.dump(directory_payload, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(directory_tmp, directory_path)
+        say("Done. %d HDB blocks written to %s" % (len(directory), directory_path))
+    except SystemExit as e:
+        say("")
+        say(str(e))
+    except Exception as e:
+        say("")
+        say("NOTE: hdb_directory.json was NOT updated this run (everything else above is "
+            "unaffected) - %s: %s" % (type(e).__name__, e))
+
+    # ------------------------------------------------------------------ 8. supermarket address list, for miji_geocode_addresses.py to geocode
+    # Same isolation as the blocks above. Just the address list - see the NOTE above
+    # SUPERMARKET_DATASET_ID for why the coordinates themselves come from a later, separate,
+    # OneMap-authenticated step (miji_geocode_addresses.py), not here.
+    try:
+        supermarkets = build_supermarket_addresses()
+        supermarkets_path = os.path.join(OUT_DIR, "supermarket_addresses.json")
+        supermarkets_payload = {
+            "built": time.strftime("%Y-%m-%d"),
+            "addresses": supermarkets,
+            "source": "National Environment Agency (NEA), List of Supermarket Licences, via "
+                       "data.gov.sg. Address/postal code only, as published - no coordinates yet "
+                       "(see index_data/nearby_amenities.json's supermarket category, added by "
+                       "miji_geocode_addresses.py, for the geocoded version this feeds).",
+        }
+        supermarkets_tmp = supermarkets_path + ".tmp"
+        with open(supermarkets_tmp, "w", encoding="utf-8") as f:
+            json.dump(supermarkets_payload, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(supermarkets_tmp, supermarkets_path)
+        say("Done. %d supermarket addresses written to %s" % (len(supermarkets), supermarkets_path))
+    except Exception as e:
+        say("")
+        say("NOTE: supermarket_addresses.json was NOT updated this run (everything else above is "
+            "unaffected) - %s: %s" % (type(e).__name__, e))
 
 
 if __name__ == "__main__":
