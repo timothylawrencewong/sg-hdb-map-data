@@ -12,15 +12,19 @@ What it does:
      trend, which is a much smaller amount of data (26 towns x 7 types x ~8 years of numbers, not
      every individual block).
   2. Reads the private_data/d*.json files that ura_build.py already produced earlier in the same
-     run, and works out median $psf (not total price - condo/landed unit sizes vary too much
-     within a type for a total-price median to mean much) per YEAR for each of URA's three market
-     segments (CCR / RCR / OCR), again with percentiles + sale count. URA's own Data Service only
-     gives about the last 5 years of transactions, so private-property years before that are
-     backward-projected from the earliest real growth rate available and marked as such in the
-     output - never presented as an actual sale.
-  3. Every HDB town is assigned to the market segment it actually sits in (see TOWN_SEGMENT below)
-     so "Private (Condo)" and "Landed" numbers for that town use that segment's real $psf trend,
-     not one Singapore-wide average.
+     run - one file per URA postal district (d01.json ... d28.json) - and works out median $psf
+     (not total price - condo/landed unit sizes vary too much within a type for a total-price
+     median to mean much) per YEAR for each district, again with percentiles + sale count. URA's
+     own Data Service only gives about the last 5 years of transactions, so private-property years
+     before that are backward-projected from the earliest real growth rate available and marked as
+     such in the output - never presented as an actual sale.
+  3. Every HDB town is assigned to the URA postal district(s) it actually sits in (see
+     TOWN_DISTRICT below), so "Private (Condo)" and "Landed" numbers for that town are pooled from
+     real transactions in its own district(s) - not from a Singapore-wide average, and not lumped
+     in with every other town in the same broad CCR/RCR/OCR segment either. A town whose district
+     is shared with other towns (there are only 28 districts for 26 towns, and a couple of towns
+     genuinely straddle two districts - see TOWN_DISTRICT) will still share numbers with those
+     specific towns, since that's the real geography, not an approximation shortcut.
   4. The most recent slot in every series is NOT "this calendar year so far" (which would be an
      unfair, partial-year number sitting next to seven full calendar years) - it's a genuine
      trailing-12-month window ending at build time. Everything else - the 7 years before that -
@@ -33,9 +37,10 @@ What it does:
 
 This is real, sourced data - HDB side is exact (every registered resale transaction, from HDB
 via data.gov.sg, Open Data Licence, free for personal or commercial use). The private-property
-side is an estimate (URA market-segment index/median, not an individual per-town figure), and the
-output says so explicitly so the front end can show the same "these are estimates" language it
-already uses for the methodology box.
+side is a district-level estimate (URA postal-district median, pooled across a town's assigned
+district(s) - not an exact per-town transaction count, since landed/condo sales in any one HDB
+town are usually too thin on their own), and the output says so explicitly so the front end can
+show the same "these are estimates" language it already uses for the methodology box.
 
 How to run (Terminal), from the folder that holds this file and (for private data) next to a
 private_data folder already built by ura_build.py:
@@ -88,19 +93,28 @@ HDB_FLAT_TYPE_MAP = {
 }
 PRIVATE_TYPES = ["Private (Condo)", "Landed"]  # shown as $psf, not total price - see build_private_medians
 
-# Every HDB town, assigned to the URA market segment (CCR / RCR / OCR) it actually sits in.
-# This is the standard three-tier split URA itself publishes its private price index by - it is
-# the least-arbitrary way to give each town a private-property trend without pretending we have
-# per-town private transactions (we don't; see the docstring above).
-TOWN_SEGMENT = {
-    "Ang Mo Kio": "OCR", "Bedok": "OCR", "Bishan": "RCR", "Bukit Batok": "OCR",
-    "Bukit Merah": "RCR", "Bukit Panjang": "OCR", "Bukit Timah": "CCR",
-    "Central Area": "CCR", "Choa Chu Kang": "OCR", "Clementi": "OCR",
-    "Geylang": "RCR", "Hougang": "OCR", "Jurong East": "OCR", "Jurong West": "OCR",
-    "Kallang/Whampoa": "RCR", "Marine Parade": "RCR", "Pasir Ris": "OCR",
-    "Punggol": "OCR", "Queenstown": "RCR", "Sembawang": "OCR", "Sengkang": "OCR",
-    "Serangoon": "RCR", "Tampines": "OCR", "Toa Payoh": "RCR", "Woodlands": "OCR",
-    "Yishun": "OCR", "Central": "RCR",  # both spellings seen across earlier mockups
+# Every HDB town, assigned to the URA postal district(s) it actually sits in - district codes
+# match the private_data/d##.json filenames ura_build.py already writes (e.g. "20" -> d20.json).
+# This replaces an earlier, coarser version of this mapping that only used the three CCR/RCR/OCR
+# market segments - with just 3 segments, every town in the same segment showed IDENTICAL
+# Condo/Landed numbers (e.g. Ang Mo Kio, Tampines and Punggol are all "OCR"), which looked like a
+# bug even though it wasn't one. URA's own postal districts (28 of them) are the standard, publicly
+# documented finer split - most towns get their own district and a real, differentiated trend;
+# a handful of towns still share a district with a neighbour (there are only 28 districts for 26
+# towns, and HDB town boundaries don't line up exactly with URA's), which is the genuine geography,
+# not a shortcut. A town listed with two districts (e.g. Bukit Merah) has its real transactions
+# pooled across both before the median is taken, since its planning area genuinely spans both.
+# Source: URA's published postal-district reference, cross-checked against two independent SG
+# property-district guides (see the note on build_private_medians for specifics).
+TOWN_DISTRICT = {
+    "Ang Mo Kio": ["20"], "Bedok": ["16"], "Bishan": ["20"], "Bukit Batok": ["23"],
+    "Bukit Merah": ["03", "04"], "Bukit Panjang": ["23"], "Bukit Timah": ["10"],
+    "Central Area": ["01", "02", "06", "07"], "Choa Chu Kang": ["23"], "Clementi": ["05"],
+    "Geylang": ["14"], "Hougang": ["19"], "Jurong East": ["22"], "Jurong West": ["22"],
+    "Kallang/Whampoa": ["12"], "Marine Parade": ["15"], "Pasir Ris": ["18"],
+    "Punggol": ["19"], "Queenstown": ["03"], "Sembawang": ["27"], "Sengkang": ["19"],
+    "Serangoon": ["19"], "Tampines": ["18"], "Toa Payoh": ["12"], "Woodlands": ["25"],
+    "Yishun": ["27"], "Central": ["01", "02", "06", "07"],  # both spellings seen across earlier mockups
 }
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; MijiIndexBuilder/1.0; +https://miji.sg)", "Accept": "application/json"}
@@ -382,18 +396,23 @@ def group_of(ptype):
 
 
 def build_private_medians(ttm_months):
-    """Reads private_data/d*.json (built earlier in the same run by ura_build.py) and returns
-    {segment: {"Private (Condo)": {"values": {year_or_CURRENT_SLOT: stats_dict}, "estimated_years": [...]}, "Landed": {...}}}
-    for segment in CCR/RCR/OCR. The published number is median $psf, not total price - condo and
-    landed unit sizes vary too much within a type for a total-price median to mean much; $psf is
-    what's actually comparable across projects. Returns {} (not an error) if private_data isn't
-    there - the HDB side of the Miji Index still works on its own."""
+    """Reads private_data/d*.json (built earlier in the same run by ura_build.py - one file per
+    URA postal district, e.g. d20.json) and returns
+    {town: {"Private (Condo)": {"values": {year_or_CURRENT_SLOT: stats_dict}, "estimated_slots": [...]}, "Landed": {...}}}
+    for every town in TOWN_DISTRICT. Raw $psf sales are bucketed by district first (the real,
+    file-level granularity), then pooled across whichever district(s) TOWN_DISTRICT assigns to
+    each town BEFORE taking a median - a town spanning two districts (see TOWN_DISTRICT) gets one
+    combined pool of real sales, not an average of two separately-computed medians, so the
+    percentile/sale-count figures stay meaningful. The published number is median $psf, not total
+    price - condo and landed unit sizes vary too much within a type for a total-price median to
+    mean much; $psf is what's actually comparable across projects. Returns {} (not an error) if
+    private_data isn't there - the HDB side of the Miji Index still works on its own."""
     if not os.path.isdir(PRIVATE_DIR):
         say("No %s folder found (ura_build.py hasn't run yet in this job) - "
             "Miji Index will only have HDB data this time." % PRIVATE_DIR)
         return {}
     say("Reading private-property transactions already downloaded by ura_build.py...")
-    # seg -> group -> year_or_CURRENT_SLOT -> [psf values]
+    # district ("01".."28", from the d##.json filename) -> group -> year_or_CURRENT_SLOT -> [psf values]
     cal_buckets = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     ttm_buckets = defaultdict(lambda: defaultdict(list))
     files_read = 0
@@ -401,14 +420,12 @@ def build_private_medians(ttm_months):
     for name in sorted(os.listdir(PRIVATE_DIR)):
         if not (name.startswith("d") and name.endswith(".json")):
             continue
+        district = name[1:-5]  # "d20.json" -> "20" - matches TOWN_DISTRICT's codes directly
         try:
             with open(os.path.join(PRIVATE_DIR, name), "r", encoding="utf-8") as f:
                 data = json.load(f)
             types = data.get("types", [])
             for proj in data.get("P", []):
-                seg = (proj.get("seg") or "").upper()
-                if seg not in ("CCR", "RCR", "OCR"):
-                    continue
                 for t in proj.get("T", []):
                     if len(t) < 6:
                         continue  # a row from an older/shorter format - skip rather than crash
@@ -422,9 +439,9 @@ def build_private_medians(ttm_months):
                     psf = price / (sqm * SQM_TO_SQFT)
                     g = group_of(ptype)
                     if year in CALENDAR_YEARS:
-                        cal_buckets[seg][g][year].append(psf)
+                        cal_buckets[district][g][year].append(psf)
                     if (year, mon) in ttm_months:
-                        ttm_buckets[seg][g].append(psf)
+                        ttm_buckets[district][g].append(psf)
         except Exception as e:
             # One oddly-shaped district file shouldn't take down the whole build - skip it and
             # carry on with the rest, which is far better than losing all the private data.
@@ -439,25 +456,31 @@ def build_private_medians(ttm_months):
         return {}
     say("   read %d district files" % files_read)
 
-    segs = set(list(cal_buckets.keys()) + list(ttm_buckets.keys()))
     out = {}
-    for seg in segs:
-        out[seg] = {}
+    for town, districts in TOWN_DISTRICT.items():
+        out[town] = {}
         for group, label in (("condo", "Private (Condo)"), ("landed", "Landed")):
             real = {}
             for y in CALENDAR_YEARS:
-                vals = cal_buckets.get(seg, {}).get(group, {}).get(y)
+                # Pool the RAW sale psf's across every district this town is assigned to before
+                # taking the median - not an average of pre-computed per-district medians, so a
+                # two-district town's percentiles/sale-count still describe one real sample.
+                vals = []
+                for d in districts:
+                    vals.extend(cal_buckets.get(d, {}).get(group, {}).get(y, []))
                 s = stats_for(vals) if vals else None
                 if s:
                     real[y] = s
-            ttm_vals = ttm_buckets.get(seg, {}).get(group)
+            ttm_vals = []
+            for d in districts:
+                ttm_vals.extend(ttm_buckets.get(d, {}).get(group, []))
             ttm_stats = stats_for(ttm_vals) if ttm_vals else None
             if ttm_stats:
                 real[CURRENT_SLOT] = ttm_stats
             if not real:
                 continue
             # URA's Data Service only gives ~5 years back, AND the current window can still be
-            # thin for a slow segment/group. Project both directions using the earliest
+            # thin for a slow district/group. Project both directions using the earliest
             # year-over-year $psf growth rate we do have, rather than inventing an unrelated
             # number. Filled slots are marked in the output as estimated - never shown as a real sale.
             filled, est_slots = dict(real), []
@@ -482,7 +505,9 @@ def build_private_medians(ttm_months):
                 if prv in filled:
                     filled[y] = {"n": 0, "med": int(round(filled[prv]["med"] * growth)), "p25": None, "p75": None}
                     est_slots.append(y)
-            out[seg][label] = {"values": filled, "estimated_slots": sorted(est_slots)}
+            out[town][label] = {"values": filled, "estimated_slots": sorted(est_slots)}
+        if not out[town]:
+            del out[town]
     return out
 
 
@@ -912,9 +937,9 @@ def main():
     hdb, towns_seen = build_hdb_medians(ttm_months)
     private = build_private_medians(ttm_months)
 
-    unmapped = [t for t in towns_seen if t not in TOWN_SEGMENT]
+    unmapped = [t for t in towns_seen if t not in TOWN_DISTRICT]
     if unmapped:
-        say("   NOTE: these towns appeared in the HDB data but aren't in TOWN_SEGMENT yet, "
+        say("   NOTE: these towns appeared in the HDB data but aren't in TOWN_DISTRICT yet, "
             "so they'll have no private-property numbers until added: %s" % ", ".join(unmapped))
 
     private_estimated = {}
@@ -931,15 +956,14 @@ def main():
                 # different years to draw a trend line (need >=2). Not the same as zero sales ever -
                 # logged here so it's visible instead of silently looking identical to "no data at all".
                 borderline.append((town, ft, len(slots), sorted(slots.keys())))
-        seg = TOWN_SEGMENT.get(town)
-        if seg and seg in private:
-            for label, d in private[seg].items():
+        if town in private:
+            for label, d in private[town].items():
                 vals = d["values"]
                 if all(y in vals for y in YEARS):
                     entry[label] = slots_to_entry(vals)
-                    if seg not in private_estimated:
-                        private_estimated[seg] = {}
-                    private_estimated[seg][label] = d["estimated_slots"]
+                    if town not in private_estimated:
+                        private_estimated[town] = {}
+                    private_estimated[town][label] = d["estimated_slots"]
         if entry:
             result_towns[town] = entry
 
@@ -971,10 +995,13 @@ def main():
                    "personal or commercial use.",
             "private": "Urban Redevelopment Authority (URA), Private Residential Property "
                        "Transactions, via the URA Data Service API. Median $ per square foot, "
-                       "grouped by URA market segment (CCR/RCR/OCR) and applied to each town in "
-                       "that segment - an estimate, not a per-town transaction median. Years older "
-                       "than URA's ~5-year window are backward-projected from the earliest "
-                       "available growth rate and marked in 'private_estimated_slots' below.",
+                       "pooled from real transactions in the URA postal district(s) each town sits "
+                       "in - the standard 28-district split, finer than URA's own 3-tier CCR/RCR/OCR "
+                       "segments, though a handful of towns that share a district (or genuinely span "
+                       "two) will still show the same or pooled numbers. An estimate, not an exact "
+                       "per-town transaction median. Years older than URA's ~5-year window are "
+                       "backward-projected from the earliest available growth rate and marked in "
+                       "'private_estimated_slots' below.",
             "current_slot": "The most recent point in every series is a trailing 12-month window "
                              "(%s), not a partial calendar year - so it's never compared unfairly "
                              "against a full year of data." % ttm_label,
