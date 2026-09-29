@@ -70,6 +70,20 @@ CACHE_HOURS = 20   # the HDB dataset updates daily; no need to re-download more 
 PROPERTY_INFO_CACHE_HOURS = 24 * 30   # this one only updates quarterly - no need to refetch often
 SQM_TO_SQFT = 10.7639  # matches ura_build.py
 
+# A handful of URA's own "Detached"/landed rows report LAND-plot area rather than built floor
+# area for t[2] (found by inspecting district files directly - several "Detached" sales sharing a
+# suspiciously identical ~370 sqm and dividing out to ~$250-340 psf, versus every genuine Terrace
+# sale in the same district and period at $700+ psf). Dividing price by a land-sized denominator
+# produces a "psf" far below anything a genuine floor-area sale could be, which used to get
+# diluted away harmlessly inside the old, much bigger CCR/RCR/OCR-wide medians - but a single
+# district's landed sample can be thin enough (sometimes single digits a year) that 3-4 bad rows
+# dominate the whole median, and then compound into an absurd number once the growth-rate
+# projection fills in the surrounding years. These bounds are wide (they're meant to catch data
+# errors, not exclude genuine luxury or budget sales) but every real per-unit floor-area sale
+# observed across every district checked has fallen well inside them.
+PSF_SANITY_MIN = 400    # $/sqft - below this, a floor-area sale isn't plausible anywhere in SG
+PSF_SANITY_MAX = 8000   # $/sqft - above this, even a prime GCB/penthouse median is implausible
+
 _NOW_YEAR = time.gmtime().tm_year
 YEARS = list(range(_NOW_YEAR - 7, _NOW_YEAR + 1))  # a rolling 8-year window ending at THIS year -
 # computed fresh every run, not a fixed list. Without this, the chart would freeze at whatever
@@ -437,6 +451,8 @@ def build_private_medians(ttm_months):
                         continue  # can't get a $psf out of this row - skip it, don't fake a size
                     year, mon = ym // 100, ym % 100
                     psf = price / (sqm * SQM_TO_SQFT)
+                    if psf < PSF_SANITY_MIN or psf > PSF_SANITY_MAX:
+                        continue  # implausible floor-area $psf - see PSF_SANITY_MIN/MAX above
                     g = group_of(ptype)
                     if year in CALENDAR_YEARS:
                         cal_buckets[district][g][year].append(psf)
@@ -480,16 +496,29 @@ def build_private_medians(ttm_months):
             if not real:
                 continue
             # URA's Data Service only gives ~5 years back, AND the current window can still be
-            # thin for a slow district/group. Project both directions using the earliest
-            # year-over-year $psf growth rate we do have, rather than inventing an unrelated
-            # number. Filled slots are marked in the output as estimated - never shown as a real sale.
+            # thin for a slow district/group. Project both directions using a growth rate worked
+            # out from the real years we do have, rather than inventing an unrelated number.
+            # Filled slots are marked in the output as estimated - never shown as a real sale.
             filled, est_slots = dict(real), []
             known = sorted(y for y in real if y != CURRENT_SLOT) or sorted(real)
             if len(known) >= 2:
-                growth = real[known[1]]["med"] / real[known[0]]["med"] if real[known[0]]["med"] else 1.0
+                # CAGR across the FULL real span (earliest to latest known year), not just the
+                # first two points - a district's real sample can be thin enough (a handful of
+                # landed sales a year, sometimes fewer) that any single adjacent pair is noisy;
+                # spreading the same total change over every real year in between is far less
+                # sensitive to one unusually cheap or expensive sale landing right next to another.
+                first_med, last_med = real[known[0]]["med"], real[known[-1]]["med"]
+                span = known[-1] - known[0]
+                growth = (last_med / first_med) ** (1.0 / span) if first_med and span > 0 else 1.0
             else:
                 growth = 1.0
-            growth = max(growth, 0.5)  # guard against a wild or negative rate from thin data
+            # Hard sanity band on the resulting per-year rate: roughly -10%/+15% a year covers
+            # even Singapore private property's most extreme historical swings (the 2008-09 crash,
+            # the post-COVID boom). A thin real sample can still imply something wilder than that
+            # by chance - clamping here stops a noisy pair from compounding into an implausible
+            # headline over a 7-8 year projection, while leaving genuinely large sustained moves
+            # (still bounded, just not to a single unrealistic multi-hundred-percent figure) alone.
+            growth = min(max(growth, 0.90), 1.15)
             for y in sorted(CALENDAR_YEARS, reverse=True):  # backward: older than the real window
                 if y in filled:
                     continue
@@ -665,6 +694,8 @@ def build_private_project_history():
                         continue
                     ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
                     psf = price / (sqm * SQM_TO_SQFT)
+                    if psf < PSF_SANITY_MIN or psf > PSF_SANITY_MAX:
+                        continue  # implausible floor-area $psf - see PSF_SANITY_MIN/MAX above build_private_medians
                     buckets[(pname, pstreet, seg, group_of(ptype))][year].append(psf)
         except Exception as e:
             skipped_files.append("%s (%s: %s)" % (name, type(e).__name__, e))
