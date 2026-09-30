@@ -93,6 +93,12 @@ CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build
                                # not "this year so far" - so it's never compared unfairly against a full year
 
 LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
+# Landed housing is structurally much rarer than HDB or condo in most towns - a handful of
+# unlike-for-unlike bungalow/terrace sales (different sizes, streets, land tenure) can swing a
+# "median" wildly year to year even at n=6 or n=7, in a way that would never happen with condo or
+# HDB resale volumes. The plain n<5 bar used everywhere else barely ever fires for Landed, so it
+# gets its own, stricter bar instead of silently inheriting one tuned for much deeper markets.
+LOW_SAMPLE_N_LANDED = 10
 MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
 
 # A district-wide Condo/Landed $psf median pools EVERY sale in a period - including brand-new
@@ -1012,13 +1018,16 @@ def build_supermarket_addresses():
 
 
 # ------------------------------------------------------------------ 3. combine + write
-def slots_to_entry(stats_by_slot):
+def slots_to_entry(stats_by_slot, low_n=LOW_SAMPLE_N):
     """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low, comp}
     ready to publish. A slot that's missing entirely stays null across the board - never faked.
     "comp" parallels the other arrays - null in the ordinary case, or the composition_for() dict
     for the (rare) slot where a launch or two is driving the period's volume; see
     NEW_LAUNCH_SHARE_THRESHOLD for when that fires. HDB slots never have one (composition_for is
-    only ever called for Condo/Landed) so this is just an array of nulls there - negligible size."""
+    only ever called for Condo/Landed) so this is just an array of nulls there - negligible size.
+    low_n is the sample-size bar below which a slot gets flagged "low" - callers pass
+    LOW_SAMPLE_N_LANDED for the Landed series, since landed volumes are structurally much thinner
+    than HDB/condo and the plain LOW_SAMPLE_N bar barely ever fires there."""
     vals, ns, p25s, p75s, lows, comps = [], [], [], [], [], []
     for y in YEARS:
         s = stats_by_slot.get(y)
@@ -1028,7 +1037,7 @@ def slots_to_entry(stats_by_slot):
         else:
             vals.append(s["med"]); ns.append(s.get("n")); p25s.append(s.get("p25")); p75s.append(s.get("p75"))
             n = s.get("n") or 0
-            lows.append(n < LOW_SAMPLE_N)
+            lows.append(n < low_n)
             comps.append(s.get("composition"))
     return {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows, "comp": comps}
 
@@ -1063,7 +1072,8 @@ def main():
             for label, d in private[town].items():
                 vals = d["values"]
                 if all(y in vals for y in YEARS):
-                    entry[label] = slots_to_entry(vals)
+                    low_n = LOW_SAMPLE_N_LANDED if label == "Landed" else LOW_SAMPLE_N
+                    entry[label] = slots_to_entry(vals, low_n=low_n)
                     if town not in private_estimated:
                         private_estimated[town] = {}
                     private_estimated[town][label] = d["estimated_slots"]
@@ -1091,6 +1101,7 @@ def main():
         "years": YEARS,
         "current_slot_label": ttm_label,   # what the last "year" tick actually means - see docstring
         "low_sample_n": LOW_SAMPLE_N,
+        "low_sample_n_landed": LOW_SAMPLE_N_LANDED,
         "sources": {
             "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
                    "Every registered resale transaction, median per town/flat type/year (25th-75th "
