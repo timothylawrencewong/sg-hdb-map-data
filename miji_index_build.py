@@ -95,6 +95,22 @@ CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build
 LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
 MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
 
+# A district-wide Condo/Landed $psf median pools EVERY sale in a period - including brand-new
+# launches selling at initial developer pricing, right alongside decades-old resale stock. When
+# one or two active launches make up a big share of a period's sales, the pooled median can swing
+# hard on launch pricing alone, while the resale stock around it barely moved (found for real:
+# Bedok's trailing-12-month condo psf was 60% two launches - Pinery Residences, Vela Bay - selling
+# well above the surrounding resale stock). That's not a data bug, but it IS a materially different
+# story from "this estate's prices went up" - so any slot where new-sale (developer) transactions
+# cross this share of the period's volume gets a "composition" note attached: which launch(es),
+# their share, and what the resale-only stock traded at instead - the same "explain, don't hide"
+# principle as the existing thin-sample/estimated-year flag, for a large-sample case that flag
+# can't catch (a launch-heavy period is often NOT thin at all - Bedok's was 1,551 sales).
+NEW_LAUNCH_SHARE_THRESHOLD = 0.30   # new-sale share of a slot's volume that triggers the note
+NEW_LAUNCH_MIN_N = 5                 # ...but only if there are at least this many new-sale rows -
+                                      # a 2-of-3-sales "60% new launch" reading on a near-empty slot
+                                      # is just noise the low-sample flag already covers on its own
+
 RECENT_MONTHS = 8   # how far back "Check a Unit" comparables look - matches the site copy
                      # ("sold in the past 8 months"). Independent of YEARS/CURRENT_SLOT above -
                      # this feeds a different output file (recent_transactions.json), not the Index.
@@ -169,6 +185,44 @@ def stats_for(vals):
         return None
     p25, p75 = ipctl(vals)
     return {"n": len(vals), "med": imed(vals), "p25": p25, "p75": p75}
+
+
+def composition_for(entries):
+    """entries: [(psf, saletype, project_name), ...] for one Condo/Landed year/window slot.
+    Returns None for the ordinary case (no single launch dominating), or a dict describing which
+    launch(es) are driving the period and what the resale-only stock looked like instead - see
+    NEW_LAUNCH_SHARE_THRESHOLD above for why this exists. Never fabricates a project name or a
+    resale figure that isn't in the real data; a slot with no resale sales at all in the same
+    period just gets resale_n=0 / resale_med=None, left for the front end to word accordingly."""
+    n = len(entries)
+    if not n:
+        return None
+    new_entries = [e for e in entries if e[1] == 1]
+    if len(new_entries) < NEW_LAUNCH_MIN_N:
+        return None
+    new_share = len(new_entries) / n
+    if new_share < NEW_LAUNCH_SHARE_THRESHOLD:
+        return None
+    by_project = defaultdict(list)
+    for psf, _saletype, name in new_entries:
+        by_project[name or "Unknown project"].append(psf)
+    ranked = sorted(
+        ({"name": name, "n": len(psfs), "med": imed(psfs)} for name, psfs in by_project.items()),
+        key=lambda p: -p["n"],
+    )
+    resale_entries = [e for e in entries if e[1] != 1]
+    resale_psfs = [e[0] for e in resale_entries]
+    resale_stats = stats_for(resale_psfs)
+    return {
+        "new_launch_share": round(new_share, 3),
+        "new_launch_n": len(new_entries),
+        "new_launch_projects": ranked[:3],
+        "new_launch_projects_more": max(0, len(ranked) - 3),
+        "resale_n": resale_stats["n"] if resale_stats else 0,
+        "resale_med": resale_stats["med"] if resale_stats else None,
+        "resale_p25": resale_stats["p25"] if resale_stats else None,
+        "resale_p75": resale_stats["p75"] if resale_stats else None,
+    }
 
 
 # ------------------------------------------------------------------ trailing-12-month window
@@ -426,7 +480,10 @@ def build_private_medians(ttm_months):
             "Miji Index will only have HDB data this time." % PRIVATE_DIR)
         return {}
     say("Reading private-property transactions already downloaded by ura_build.py...")
-    # district ("01".."28", from the d##.json filename) -> group -> year_or_CURRENT_SLOT -> [psf values]
+    # district ("01".."28", from the d##.json filename) -> group -> year_or_CURRENT_SLOT ->
+    # [(psf, saletype, project_name), ...] - saletype/project_name ride along with every psf now
+    # (not just a bare float) so composition_for() can later tell an ordinary period apart from one
+    # dominated by a launch or two, without a second pass back over the raw district files.
     cal_buckets = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     ttm_buckets = defaultdict(lambda: defaultdict(list))
     files_read = 0
@@ -440,11 +497,13 @@ def build_private_medians(ttm_months):
                 data = json.load(f)
             types = data.get("types", [])
             for proj in data.get("P", []):
+                proj_name = proj.get("n") or "Unknown project"
                 for t in proj.get("T", []):
                     if len(t) < 6:
                         continue  # a row from an older/shorter format - skip rather than crash
                     ym, price = t[0], t[1]
                     sqm = t[2] if len(t) > 2 else None
+                    saletype = t[4] if len(t) > 4 else None  # 1 new, 2 sub, 3 resale
                     ptype_idx = t[5]
                     ptype = types[ptype_idx] if 0 <= ptype_idx < len(types) else ""
                     if not sqm or sqm <= 0 or not price or price <= 0:
@@ -454,10 +513,11 @@ def build_private_medians(ttm_months):
                     if psf < PSF_SANITY_MIN or psf > PSF_SANITY_MAX:
                         continue  # implausible floor-area $psf - see PSF_SANITY_MIN/MAX above
                     g = group_of(ptype)
+                    entry = (psf, saletype, proj_name)
                     if year in CALENDAR_YEARS:
-                        cal_buckets[district][g][year].append(psf)
+                        cal_buckets[district][g][year].append(entry)
                     if (year, mon) in ttm_months:
-                        ttm_buckets[district][g].append(psf)
+                        ttm_buckets[district][g].append(entry)
         except Exception as e:
             # One oddly-shaped district file shouldn't take down the whole build - skip it and
             # carry on with the rest, which is far better than losing all the private data.
@@ -478,20 +538,26 @@ def build_private_medians(ttm_months):
         for group, label in (("condo", "Private (Condo)"), ("landed", "Landed")):
             real = {}
             for y in CALENDAR_YEARS:
-                # Pool the RAW sale psf's across every district this town is assigned to before
+                # Pool the RAW sale entries across every district this town is assigned to before
                 # taking the median - not an average of pre-computed per-district medians, so a
                 # two-district town's percentiles/sale-count still describe one real sample.
-                vals = []
+                entries = []
                 for d in districts:
-                    vals.extend(cal_buckets.get(d, {}).get(group, {}).get(y, []))
-                s = stats_for(vals) if vals else None
+                    entries.extend(cal_buckets.get(d, {}).get(group, {}).get(y, []))
+                s = stats_for([e[0] for e in entries]) if entries else None
                 if s:
+                    comp = composition_for(entries)
+                    if comp:
+                        s["composition"] = comp
                     real[y] = s
-            ttm_vals = []
+            ttm_entries = []
             for d in districts:
-                ttm_vals.extend(ttm_buckets.get(d, {}).get(group, []))
-            ttm_stats = stats_for(ttm_vals) if ttm_vals else None
+                ttm_entries.extend(ttm_buckets.get(d, {}).get(group, []))
+            ttm_stats = stats_for([e[0] for e in ttm_entries]) if ttm_entries else None
             if ttm_stats:
+                ttm_comp = composition_for(ttm_entries)
+                if ttm_comp:
+                    ttm_stats["composition"] = ttm_comp
                 real[CURRENT_SLOT] = ttm_stats
             if not real:
                 continue
@@ -947,18 +1013,24 @@ def build_supermarket_addresses():
 
 # ------------------------------------------------------------------ 3. combine + write
 def slots_to_entry(stats_by_slot):
-    """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low}
-    ready to publish. A slot that's missing entirely stays null across the board - never faked."""
-    vals, ns, p25s, p75s, lows = [], [], [], [], []
+    """{year_or_CURRENT_SLOT: stats_dict} for all 8 YEARS slots -> {vals, n, p25, p75, low, comp}
+    ready to publish. A slot that's missing entirely stays null across the board - never faked.
+    "comp" parallels the other arrays - null in the ordinary case, or the composition_for() dict
+    for the (rare) slot where a launch or two is driving the period's volume; see
+    NEW_LAUNCH_SHARE_THRESHOLD for when that fires. HDB slots never have one (composition_for is
+    only ever called for Condo/Landed) so this is just an array of nulls there - negligible size."""
+    vals, ns, p25s, p75s, lows, comps = [], [], [], [], [], []
     for y in YEARS:
         s = stats_by_slot.get(y)
         if not s or s.get("med") is None:
             vals.append(None); ns.append(None); p25s.append(None); p75s.append(None); lows.append(False)
+            comps.append(None)
         else:
             vals.append(s["med"]); ns.append(s.get("n")); p25s.append(s.get("p25")); p75s.append(s.get("p75"))
             n = s.get("n") or 0
             lows.append(n < LOW_SAMPLE_N)
-    return {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows}
+            comps.append(s.get("composition"))
+    return {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows, "comp": comps}
 
 
 def main():
