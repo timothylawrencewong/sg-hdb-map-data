@@ -19,12 +19,21 @@ What it does:
      before that are backward-projected from the earliest real growth rate available and marked as
      such in the output - never presented as an actual sale.
   3. Every HDB town is assigned to the URA postal district(s) it actually sits in (see
-     TOWN_DISTRICT below), so "Private (Condo)" and "Landed" numbers for that town are pooled from
+     TOWN_DISTRICT below), so "Private (Condo)" numbers for that town are pooled from
      real transactions in its own district(s) - not from a Singapore-wide average, and not lumped
      in with every other town in the same broad CCR/RCR/OCR segment either. A town whose district
      is shared with other towns (there are only 28 districts for 26 towns, and a couple of towns
      genuinely straddle two districts - see TOWN_DISTRICT) will still share numbers with those
      specific towns, since that's the real geography, not an approximation shortcut.
+     NOTE: Landed housing is deliberately NOT published in the Miji Index (as of 2026), even
+     though ura_build.py's district files still contain it and group_of() below still classifies
+     it. A single "Landed" $psf median pools together freehold and leasehold (sometimes with only
+     a couple of decades left on a 99-year lease) and wildly different physical property types
+     (detached, semi-D, terrace, strata terrace) - genuinely different assets, not noise around
+     one real price. Unlike Condo, that's not something a sample-size flag or a composition note
+     can responsibly caveat away, so rather than publish a number that's structurally
+     apples-to-oranges, this builder computes Condo only. See composition_for()/LOW_SAMPLE_N for
+     the (different, volume-driven) caveats that DO apply to Condo.
   4. The most recent slot in every series is NOT "this calendar year so far" (which would be an
      unfair, partial-year number sitting next to seven full calendar years) - it's a genuine
      trailing-12-month window ending at build time. Everything else - the 7 years before that -
@@ -93,15 +102,9 @@ CURRENT_SLOT = YEARS[-1]      # last slot: a trailing-12-month window (see build
                                # not "this year so far" - so it's never compared unfairly against a full year
 
 LOW_SAMPLE_N = 5   # fewer sales than this in a year/window and the point is flagged, not hidden
-# Landed housing is structurally much rarer than HDB or condo in most towns - a handful of
-# unlike-for-unlike bungalow/terrace sales (different sizes, streets, land tenure) can swing a
-# "median" wildly year to year even at n=6 or n=7, in a way that would never happen with condo or
-# HDB resale volumes. The plain n<5 bar used everywhere else barely ever fires for Landed, so it
-# gets its own, stricter bar instead of silently inheriting one tuned for much deeper markets.
-LOW_SAMPLE_N_LANDED = 10
 MIN_YEARS_PRESENT = 2   # need at least 2 data points (any confidence) to call it a usable trend
 
-# A district-wide Condo/Landed $psf median pools EVERY sale in a period - including brand-new
+# A district-wide Condo $psf median pools EVERY sale in a period - including brand-new
 # launches selling at initial developer pricing, right alongside decades-old resale stock. When
 # one or two active launches make up a big share of a period's sales, the pooled median can swing
 # hard on launch pricing alone, while the resale stock around it barely moved (found for real:
@@ -127,7 +130,9 @@ HDB_FLAT_TYPE_MAP = {
     "5 ROOM": "5-room", "EXECUTIVE": "Executive",
     # 1 ROOM and MULTI-GENERATION exist in the raw data but aren't in the Miji Index screener
 }
-PRIVATE_TYPES = ["Private (Condo)", "Landed"]  # shown as $psf, not total price - see build_private_medians
+PRIVATE_TYPES = ["Private (Condo)"]  # shown as $psf, not total price - see build_private_medians.
+# Landed is deliberately not published in the Miji Index - see the module docstring's point 3
+# for why (freehold/short-leasehold and detached/terrace/strata all pooled into one figure).
 
 # Every HDB town, assigned to the URA postal district(s) it actually sits in - district codes
 # match the private_data/d##.json filenames ura_build.py already writes (e.g. "20" -> d20.json).
@@ -194,7 +199,7 @@ def stats_for(vals):
 
 
 def composition_for(entries):
-    """entries: [(psf, saletype, project_name), ...] for one Condo/Landed year/window slot.
+    """entries: [(psf, saletype, project_name), ...] for one Condo year/window slot.
     Returns None for the ordinary case (no single launch dominating), or a dict describing which
     launch(es) are driving the period and what the resale-only stock looked like instead - see
     NEW_LAUNCH_SHARE_THRESHOLD above for why this exists. Never fabricates a project name or a
@@ -472,8 +477,9 @@ def group_of(ptype):
 def build_private_medians(ttm_months):
     """Reads private_data/d*.json (built earlier in the same run by ura_build.py - one file per
     URA postal district, e.g. d20.json) and returns
-    {town: {"Private (Condo)": {"values": {year_or_CURRENT_SLOT: stats_dict}, "estimated_slots": [...]}, "Landed": {...}}}
-    for every town in TOWN_DISTRICT. Raw $psf sales are bucketed by district first (the real,
+    {town: {"Private (Condo)": {"values": {year_or_CURRENT_SLOT: stats_dict}, "estimated_slots": [...]}}}
+    for every town in TOWN_DISTRICT (Landed is intentionally excluded - see the module docstring's
+    point 3). Raw $psf sales are bucketed by district first (the real,
     file-level granularity), then pooled across whichever district(s) TOWN_DISTRICT assigns to
     each town BEFORE taking a median - a town spanning two districts (see TOWN_DISTRICT) gets one
     combined pool of real sales, not an average of two separately-computed medians, so the
@@ -541,7 +547,8 @@ def build_private_medians(ttm_months):
     out = {}
     for town, districts in TOWN_DISTRICT.items():
         out[town] = {}
-        for group, label in (("condo", "Private (Condo)"), ("landed", "Landed")):
+        for group, label in (("condo", "Private (Condo)"),):
+            # Landed is deliberately not computed here - see the module docstring's point 3.
             real = {}
             for y in CALENDAR_YEARS:
                 # Pool the RAW sale entries across every district this town is assigned to before
@@ -1024,10 +1031,11 @@ def slots_to_entry(stats_by_slot, low_n=LOW_SAMPLE_N):
     "comp" parallels the other arrays - null in the ordinary case, or the composition_for() dict
     for the (rare) slot where a launch or two is driving the period's volume; see
     NEW_LAUNCH_SHARE_THRESHOLD for when that fires. HDB slots never have one (composition_for is
-    only ever called for Condo/Landed) so this is just an array of nulls there - negligible size.
-    low_n is the sample-size bar below which a slot gets flagged "low" - callers pass
-    LOW_SAMPLE_N_LANDED for the Landed series, since landed volumes are structurally much thinner
-    than HDB/condo and the plain LOW_SAMPLE_N bar barely ever fires there."""
+    only ever called for Condo) so this is just an array of nulls there - negligible size.
+    low_n is the sample-size bar below which a slot gets flagged "low"; every caller currently
+    passes the default (LOW_SAMPLE_N) since Landed - the one series that needed a stricter bar -
+    is no longer published at all. Kept as a parameter rather than inlined in case a future,
+    similarly-thin series needs its own bar again."""
     vals, ns, p25s, p75s, lows, comps = [], [], [], [], [], []
     for y in YEARS:
         s = stats_by_slot.get(y)
@@ -1072,8 +1080,7 @@ def main():
             for label, d in private[town].items():
                 vals = d["values"]
                 if all(y in vals for y in YEARS):
-                    low_n = LOW_SAMPLE_N_LANDED if label == "Landed" else LOW_SAMPLE_N
-                    entry[label] = slots_to_entry(vals, low_n=low_n)
+                    entry[label] = slots_to_entry(vals)
                     if town not in private_estimated:
                         private_estimated[town] = {}
                     private_estimated[town][label] = d["estimated_slots"]
@@ -1101,7 +1108,6 @@ def main():
         "years": YEARS,
         "current_slot_label": ttm_label,   # what the last "year" tick actually means - see docstring
         "low_sample_n": LOW_SAMPLE_N,
-        "low_sample_n_landed": LOW_SAMPLE_N_LANDED,
         "sources": {
             "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
                    "Every registered resale transaction, median per town/flat type/year (25th-75th "
