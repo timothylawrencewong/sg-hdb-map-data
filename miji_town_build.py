@@ -118,27 +118,38 @@ def town_blocks(town, map_slugs):
 
 
 # ------------------------------------------------------------------ HDB
-def ensure_hdb_csv(tries=20, wait=15):
-    """data.gov.sg often answers the first request with status STARTING (it is still preparing the
-    file) and only gives the download link on a later request. This asks again until the link
-    arrives, then saves the file where miji_index_build.py's own downloader looks for it, so the
-    normal download call right after this just uses the saved copy."""
+def ensure_hdb_csv(tries=40, wait=15):
+    """data.gov.sg does not hand over the file straight away: it has to prepare the download first
+    (status STARTING), then gives the link. A job that nobody has asked data.gov.sg to prepare a file
+    for can sit on STARTING, so this first asks it to START preparing (initiate-download), then
+    checks every few seconds until the link arrives, then saves the file where
+    miji_index_build.py's own downloader looks for it, so the normal download call right after this
+    just uses the saved copy."""
     path = mib.hdb_cache_path()
     if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < mib.CACHE_HOURS * 3600:
         say("Using the HDB resale copy saved earlier today (%s)" % path)
         return
     os.makedirs(mib.CACHE_DIR, exist_ok=True)
+    poll_url = mib.API_BASE % mib.HDB_DATASET_ID
+    start_url = poll_url.replace("poll-download", "initiate-download")
+    try:
+        d0 = mib.get_json(start_url, tries=2, wait=5, label="HDB dataset initiate-download")
+        say("   asked data.gov.sg to start preparing the HDB file: %s" % json.dumps(d0)[:200])
+    except Exception as e:
+        say("   NOTE: could not send the start request (%s: %s). Carrying on with checking." % (type(e).__name__, e))
     url = ""
     for i in range(1, tries + 1):
-        d = mib.get_json(mib.API_BASE % mib.HDB_DATASET_ID, label="HDB dataset poll-download")
+        d = mib.get_json(poll_url, label="HDB dataset poll-download")
         url = ((d.get("data") or {}).get("url") or "")
         if url:
             break
-        status = (d.get("data") or {}).get("status")
-        say("   data.gov.sg is still preparing the HDB file (status %s). Waiting %ds, try %d of %d..." % (status, wait, i, tries))
+        if i % 4 == 1:
+            say("   data.gov.sg says: %s" % json.dumps(d)[:200])
+        say("   still preparing the HDB file. Waiting %ds, check %d of %d..." % (wait, i, tries))
         time.sleep(wait)
     if not url:
-        raise SystemExit("data.gov.sg still had not prepared the HDB resale file after %d tries. Run the workflow again in a few minutes." % tries)
+        raise SystemExit("data.gov.sg still had not prepared the HDB resale file after %d checks (about %d minutes). "
+                         "Last reply: %s" % (tries, tries * wait // 60, json.dumps(d)[:300]))
     say("Downloading the full HDB resale history...")
     raw = mib.http_get(url, timeout=300)
     with open(path, "wb") as f:
