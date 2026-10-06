@@ -3,7 +3,7 @@ name: Refresh town page data
 # Weekly refresh of the town pages (every HDB, condo and landed sale).
 # Light job: it only reads the HDB resale file from data.gov.sg plus the data/ and private_data/
 # folders already saved in the repo, so it does not repeat the long map build.
-# Put this file in .github/workflows/ . To add a town, add its name to the command below.
+# Builds EVERY town in one go. Put this file in .github/workflows/ .
 
 on:
   schedule:
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   town-pages:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -30,21 +30,27 @@ jobs:
           python-version: '3.12'
 
       - name: Build the town page data
-        run: python3 miji_town_build.py "Bukit Panjang"
+        run: python3 miji_town_build.py
 
       - name: Check the town page data before using it
         run: |
           python3 - <<'PY'
           import json, os, sys
-          path = "town_data/bukit-panjang.json"
-          if not os.path.exists(path):
-              sys.exit("STOP: no town_data/bukit-panjang.json. The live town data is unchanged.")
-          with open(path, encoding="utf-8") as f:
-              d = json.load(f)
-          n = len(d.get("hdb", {}).get("rows", []))
-          if n < 1500:
-              sys.exit("STOP: only %d HDB sales for Bukit Panjang (expected thousands). The live town data is unchanged." % n)
-          print("OK: %d HDB sales, %d private sales, built %s" % (n, len(d.get("private", {}).get("rows", [])), d.get("built")))
+          idx_path = "town_data/index.json"
+          if not os.path.exists(idx_path):
+              sys.exit("STOP: no town_data/index.json. The live town data is unchanged.")
+          with open(idx_path, encoding="utf-8") as f:
+              towns = json.load(f).get("towns", [])
+          if len(towns) < 20:
+              sys.exit("STOP: only %d towns built (expected 20+). The live town data is unchanged." % len(towns))
+          bad = []
+          for t in towns:
+              p = "town_data/%s.json" % t["slug"]
+              if not os.path.exists(p) or t.get("hdb_sales", 0) < 50:
+                  bad.append(t["name"])
+          if bad:
+              sys.exit("STOP: these towns look wrong: %s. The live town data is unchanged." % ", ".join(bad))
+          print("OK: %d towns, %d HDB sales in total" % (len(towns), sum(t["hdb_sales"] for t in towns)))
           PY
 
       - name: Publish the town page data
