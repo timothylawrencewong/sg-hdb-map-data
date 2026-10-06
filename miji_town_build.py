@@ -110,7 +110,36 @@ def town_slug_and_blocks(town):
 
 
 # ------------------------------------------------------------------ HDB
+def ensure_hdb_csv(tries=20, wait=15):
+    """data.gov.sg often answers the first request with status STARTING (it is still preparing the
+    file) and only gives the download link on a later request. This asks again until the link
+    arrives, then saves the file where miji_index_build.py's own downloader looks for it, so the
+    normal download call right after this just uses the saved copy."""
+    path = mib.hdb_cache_path()
+    if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < mib.CACHE_HOURS * 3600:
+        say("Using the HDB resale copy saved earlier today (%s)" % path)
+        return
+    os.makedirs(mib.CACHE_DIR, exist_ok=True)
+    url = ""
+    for i in range(1, tries + 1):
+        d = mib.get_json(mib.API_BASE % mib.HDB_DATASET_ID, label="HDB dataset poll-download")
+        url = ((d.get("data") or {}).get("url") or "")
+        if url:
+            break
+        status = (d.get("data") or {}).get("status")
+        say("   data.gov.sg is still preparing the HDB file (status %s). Waiting %ds, try %d of %d..." % (status, wait, i, tries))
+        time.sleep(wait)
+    if not url:
+        raise SystemExit("data.gov.sg still had not prepared the HDB resale file after %d tries. Run the workflow again in a few minutes." % tries)
+    say("Downloading the full HDB resale history...")
+    raw = mib.http_get(url, timeout=300)
+    with open(path, "wb") as f:
+        f.write(raw)
+    say("   saved %.1f MB" % (len(raw) / 1e6))
+
+
 def build_hdb(town):
+    ensure_hdb_csv()
     path = mib.download_hdb_csv()
     want = town.strip().upper()
     streets, street_ix = [], {}
