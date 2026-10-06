@@ -60,11 +60,10 @@ MIN_HDB_ROWS = 500     # a sane floor for "6 months of nationwide HDB resales" -
                        # real number, just enough to catch a badly broken/partial download
 MIN_PRIVATE_ROWS = 150  # same idea for URA - lower bar since private volumes are smaller
 MILLION = 1_000_000
-NEW_MONTH_MIN_SHARE = 0.5   # a brand-new month only replaces last month on the page once it has at
-                             # least this share of last month's HDB resale count - until then the
-                             # page keeps showing last month's (near-final) numbers, so the first
-                             # days of a month don't show "Busiest town: 18 resales" as if that
-                             # were a full month
+NEW_MONTH_MIN_SHARE = 0.0   # 0 = OFF: the weekly page always shows the current (latest) month, even in its
+                             # first days. Last month's final numbers come from the separate monthly job
+                             # (monthly_final/YYYY-MM.json). Set to e.g. 0.2 to make a new month wait until
+                             # it has 20% of last month's HDB count before replacing it on the page.
 REGION_ORDER = ["CCR", "RCR", "OCR"]   # fixed display order (URA's own convention), not sorted by
                                         # count - so the region mini-grid doesn't reshuffle week to week
 
