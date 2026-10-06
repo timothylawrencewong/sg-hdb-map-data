@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-Miji town pages: build the "every sale in this town" data file behind a town page
+Miji town pages: build the "every sale in this town" data files behind the town pages
 (for example miji.sg/towns/bukit-panjang).
 
-What it does, for each town it is asked to build (default: Bukit Panjang):
-  1. HDB: every resale transaction in that town since Jan 2017 (block, street, flat type,
+What it does, for EVERY HDB town (or only the towns you name):
+  1. HDB: every resale transaction in the town since Jan 2017 (block, street, flat type,
      storey range, floor area, lease start year, price, month). This is the same data.gov.sg
-     file miji_index_build.py already downloads, so it reuses that script's saved copy
-     (no second download).
+     file miji_index_build.py already downloads. It is read once and split by town.
   2. Condos and landed homes: every single-unit private sale URA gives us (about the last 5 years)
-     for projects that physically sit in that town. URA's postal districts do not line up with HDB
+     for projects that physically sit in the town. URA's postal districts do not line up with HDB
      towns (District 23 covers Bukit Panjang AND Bukit Batok AND Choa Chu Kang), so a project is
      counted as "in the town" only if it is within MAX_PRIVATE_DISTANCE_M of one of the town's own
-     HDB blocks. The log lists every project that was included and every near miss, so you can check
-     the list once and fix it with INCLUDE_PROJECTS / EXCLUDE_PROJECTS below.
-  3. Writes town_data/<slug>.json, in a compact shape the Miji town page reads.
+     HDB blocks. The log lists the projects counted and the near misses, so you can check the list
+     and fix it with INCLUDE_PROJECTS / EXCLUDE_PROJECTS below.
+  3. Writes town_data/<slug>.json for each town, plus town_data/index.json (the list of towns).
 
-Neither HDB nor URA publish the exact unit or the exact day of sale. The page only ever shows what
+Neither HDB nor URA publish the exact unit or the exact day of sale. The pages only ever show what
 they publish: the month, and a storey / floor RANGE.
 
-Needs, in the folder it runs from (the GitHub Actions job already has all of these by then):
+One town failing never stops the others. The run only fails if fewer than MIN_TOWNS towns were built.
+
+Needs, in the folder it runs from (the GitHub Actions job already has all of these):
   - miji_index_build.py        (imported, for the HDB download + helpers)
-  - data/towns.json and data/<slug>.json   (the HDB block list with coordinates, from sg_build.py)
-  - private_data/d*.json       (from ura_build.py; if missing, the private tabs are just left empty)
+  - data/towns.json and data/<map slug>.json   (the HDB block list with coordinates, from sg_build.py)
+  - private_data/d*.json       (from ura_build.py; if missing, the condo and landed tabs are left empty)
 
 How to run:
-    python3 miji_town_build.py                  # Bukit Panjang only
-    python3 miji_town_build.py "Bukit Panjang"  # same, explicit
+    python3 miji_town_build.py                      # every town
+    python3 miji_town_build.py "Bukit Panjang"      # just one
     python3 miji_town_build.py "Toa Payoh" "Bishan"
 Standard library only.
 """
@@ -37,7 +38,6 @@ import os
 import re
 import sys
 import time
-from collections import defaultdict
 
 import miji_index_build as mib
 
@@ -46,9 +46,10 @@ DATA_DIR = "data"
 MAX_PRIVATE_DISTANCE_M = 350   # a private project this close to one of the town's HDB blocks counts as "in the town"
 NEAR_MISS_DISTANCE_M = 800     # projects between the two distances are only logged, so you can review them
 SQM_TO_SQFT = 10.7639
-MIN_HDB_ROWS = 1500            # safety net: a real town has thousands; fewer means the download or filter went wrong
+MIN_HDB_ROWS = 50              # a town with fewer sales than this is skipped (something is wrong with the data or name)
+MIN_TOWNS = 20                 # the run fails if fewer towns than this were built
 
-# Manual fixes, by town, after you have looked at the log once. Project names exactly as the log prints them.
+# Manual fixes, by town, after you have looked at the log. Project names exactly as the log prints them.
 INCLUDE_PROJECTS = {
     # "Bukit Panjang": ["Some Project Name"],
 }
@@ -64,6 +65,7 @@ TYPE_ORDER = ["1-room", "2-room", "3-room", "4-room", "5-room", "Executive", "Mu
 SALE_LABEL = {1: "New sale", 2: "Sub sale", 3: "Resale"}
 
 say = mib.say
+_PRIVATE_CACHE = {}
 
 
 def slugify(name):
@@ -84,18 +86,24 @@ def load_json(path):
         return json.load(f)
 
 
-def town_slug_and_blocks(town):
-    """The slug used by the HDB map data, and that town's block coordinates (lat, lon)."""
-    slug = slugify(town)
-    towns_path = os.path.join(DATA_DIR, "towns.json")
-    if os.path.exists(towns_path):
+def map_towns():
+    """{lower-case town name: map slug} from the HDB map data, if it is there."""
+    out = {}
+    path = os.path.join(DATA_DIR, "towns.json")
+    if os.path.exists(path):
         try:
-            for t in load_json(towns_path).get("towns", []):
-                if (t.get("name") or "").strip().lower() == town.lower():
-                    slug = t.get("slug") or slug
-                    break
+            for t in load_json(path).get("towns", []):
+                nm = (t.get("name") or "").strip().lower()
+                if nm and t.get("slug"):
+                    out[nm] = t["slug"]
         except Exception as e:
-            say("   NOTE: could not read %s (%s: %s); using slug %r" % (towns_path, type(e).__name__, e, slug))
+            say("   NOTE: could not read %s (%s: %s)" % (path, type(e).__name__, e))
+    return out
+
+
+def town_blocks(town, map_slugs):
+    """That town's HDB block coordinates (lat, lon), from the map data."""
+    slug = map_slugs.get(town.lower()) or slugify(town)
     blocks = []
     path = os.path.join(DATA_DIR, slug + ".json")
     if os.path.exists(path):
@@ -106,7 +114,7 @@ def town_slug_and_blocks(town):
                     blocks.append((la, lo))
         except Exception as e:
             say("   NOTE: could not read %s (%s: %s)" % (path, type(e).__name__, e))
-    return slug, blocks
+    return blocks
 
 
 # ------------------------------------------------------------------ HDB
@@ -138,18 +146,17 @@ def ensure_hdb_csv(tries=20, wait=15):
     say("   saved %.1f MB" % (len(raw) / 1e6))
 
 
-def build_hdb(town):
+def read_hdb_all():
+    """Reads the HDB file once. Returns ({TOWN UPPER: [raw rows]}, {TOWN UPPER: display name})."""
     ensure_hdb_csv()
     path = mib.download_hdb_csv()
-    want = town.strip().upper()
-    streets, street_ix = [], {}
-    types, type_ix = [], {}
-    storeys, storey_ix = [], {}
-    rows = []
+    say("Reading every HDB resale sale and splitting it by town...")
+    by_town, names = {}, {}
     rows_seen = 0
     for row in mib.parse_csv_rows(path):
         rows_seen += 1
-        if (row.get("town") or "").strip().upper() != want:
+        town_raw = (row.get("town") or "").strip()
+        if not town_raw:
             continue
         ft = HDB_TYPE_MAP.get((row.get("flat_type") or "").strip().upper())
         if not ft:
@@ -171,25 +178,34 @@ def build_hdb(town):
             lease = 0
         blk = (row.get("block") or "").strip()
         st = (row.get("street_name") or "").strip().title()
-        sr = (row.get("storey_range") or "").strip()
         if not blk or not st:
             continue
+        key = town_raw.upper()
+        names.setdefault(key, town_raw.title())
+        by_town.setdefault(key, []).append((ym, blk, st, ft, (row.get("storey_range") or "").strip(), round(sqm, 1), lease, price))
+    if rows_seen < 100000:
+        raise SystemExit("STOP: only read %d rows from the HDB file (expected several hundred thousand)." % rows_seen)
+    say("   %d rows read, %d towns found" % (rows_seen, len(by_town)))
+    return by_town, names
+
+
+def pack_hdb(raw_rows):
+    streets, street_ix = [], {}
+    types, type_ix = [], {}
+    storeys, storey_ix = [], {}
+    rows = []
+    for ym, blk, st, ft, sr, sqm, lease, price in raw_rows:
         for lst, ix, v in ((streets, street_ix, st), (types, type_ix, ft), (storeys, storey_ix, sr)):
             if v not in ix:
                 ix[v] = len(lst)
                 lst.append(v)
-        rows.append([ym, blk, street_ix[st], type_ix[ft], storey_ix[sr], round(sqm, 1), lease, price])
-    if rows_seen < 100000:
-        raise SystemExit("STOP: only read %d rows from the HDB file (expected several hundred thousand)." % rows_seen)
-    if len(rows) < MIN_HDB_ROWS:
-        raise SystemExit("STOP: only %d HDB sales found for %s (expected thousands). Check the town name." % (len(rows), town))
+        rows.append([ym, blk, street_ix[st], type_ix[ft], storey_ix[sr], sqm, lease, price])
     rows.sort(key=lambda r: (-r[0], r[1]))
     # Keep flat types in a sensible order, and re-point the type index to match.
     ordered = [t for t in TYPE_ORDER if t in type_ix] + [t for t in types if t not in TYPE_ORDER]
     remap = {type_ix[t]: i for i, t in enumerate(ordered)}
     for r in rows:
         r[3] = remap[r[3]]
-    say("   HDB: %d sales in %s, %s to %s" % (len(rows), town, min(r[0] for r in rows), max(r[0] for r in rows)))
     return {
         "cols": ["ym", "blk", "street", "type", "storey", "sqm", "lease", "price"],
         "streets": streets, "types": ordered, "storeys": storeys,
@@ -198,21 +214,38 @@ def build_hdb(town):
 
 
 # ------------------------------------------------------------------ private (condo + landed)
-def build_private(town, blocks):
+def private_files():
+    """Every private_data/d##.json, read once and kept for all towns."""
+    if "files" in _PRIVATE_CACHE:
+        return _PRIVATE_CACHE["files"]
+    files = []
+    if os.path.isdir(mib.PRIVATE_DIR):
+        for name in sorted(os.listdir(mib.PRIVATE_DIR)):
+            if not (name.startswith("d") and name.endswith(".json")) or name == "index.json":
+                continue
+            try:
+                files.append((name, load_json(os.path.join(mib.PRIVATE_DIR, name))))
+            except Exception as e:
+                say("   NOTE: skipped %s (%s: %s)" % (name, type(e).__name__, e))
+    _PRIVATE_CACHE["files"] = files
+    return files
+
+
+def build_private(town, blocks, verbose):
     empty = {"cols": [], "projects": [], "types": [], "tenures": [], "rows": [], "status": "none"}
     if not blocks:
-        say("   Private: no HDB block coordinates for %s (data/<slug>.json missing), so condo and landed were left empty." % town)
+        say("   Private: no HDB block coordinates for %s, so condo and landed were left empty." % town)
         empty["status"] = "no-block-coordinates"
         return empty
-    if not os.path.isdir(mib.PRIVATE_DIR):
-        say("   Private: no %s folder, so condo and landed were left empty." % mib.PRIVATE_DIR)
+    files = private_files()
+    if not files:
+        say("   Private: no %s data found, so condo and landed were left empty." % mib.PRIVATE_DIR)
         empty["status"] = "no-private-data"
         return empty
 
     inc = set(INCLUDE_PROJECTS.get(town, []))
     exc = set(EXCLUDE_PROJECTS.get(town, []))
-    # a coarse bounding box first, so we do not measure every project against every block
-    pad = 0.02
+    pad = 0.02   # coarse bounding box first, so we do not measure every project against every block
     lat_lo = min(b[0] for b in blocks) - pad
     lat_hi = max(b[0] for b in blocks) + pad
     lon_lo = min(b[1] for b in blocks) - pad
@@ -223,14 +256,7 @@ def build_private(town, blocks):
     tenures, tenure_ix = [], {}
     rows = []
     included, near, ungeocoded = [], [], 0
-    for name in sorted(os.listdir(mib.PRIVATE_DIR)):
-        if not (name.startswith("d") and name.endswith(".json")) or name == "index.json":
-            continue
-        try:
-            data = load_json(os.path.join(mib.PRIVATE_DIR, name))
-        except Exception as e:
-            say("   NOTE: skipped %s (%s: %s)" % (name, type(e).__name__, e))
-            continue
+    for name, data in files:
         d_types = data.get("types", [])
         d_tenures = data.get("tenures", [])
         for p in data.get("P", []):
@@ -239,8 +265,9 @@ def build_private(town, blocks):
             label = pname or pstreet
             la, lo = p.get("la"), p.get("ln")
             if not isinstance(la, (int, float)) or not isinstance(lo, (int, float)) or not la or not lo:
-                ungeocoded += 1
                 dist = None
+                if label not in inc:
+                    ungeocoded += 1
             elif not (lat_lo <= la <= lat_hi and lon_lo <= lo <= lon_hi):
                 continue
             else:
@@ -275,16 +302,21 @@ def build_private(town, blocks):
                 rows.append([ym, proj_ix[key], type_ix[ptype], tenure_ix[tenure], int(sale or 0),
                              floor or "", round(sqm, 1), int(price)])
     rows.sort(key=lambda r: -r[0])
-    say("   Private: %d single-unit sales across %d projects within %dm of %s's HDB blocks" %
-        (len(rows), len(projects), MAX_PRIVATE_DISTANCE_M, town))
-    if ungeocoded:
-        say("      (%d projects had no map position and were skipped unless listed in INCLUDE_PROJECTS)" % ungeocoded)
-    say("   --- REVIEW: projects counted as inside %s (name | street | metres from nearest HDB block | district file) ---" % town)
-    for x in sorted(set(included)):
-        say("      IN   %s | %s | %dm | %s" % x)
-    say("   --- REVIEW: near misses, NOT counted (add to INCLUDE_PROJECTS if they really are in %s) ---" % town)
-    for x in sorted(set(near), key=lambda z: z[2])[:60]:
-        say("      OUT  %s | %s | %dm | %s" % x)
+    say("   Private: %d single-unit sales across %d projects within %dm of the town's HDB blocks" %
+        (len(rows), len(projects), MAX_PRIVATE_DISTANCE_M))
+    inc_sorted = sorted(set(included))
+    near_sorted = sorted(set(near), key=lambda z: z[2])
+    if verbose:
+        say("   --- REVIEW: projects counted as inside %s (name | street | metres from nearest HDB block | district file) ---" % town)
+        for x in inc_sorted:
+            say("      IN   %s | %s | %dm | %s" % x)
+        say("   --- REVIEW: near misses, NOT counted (add to INCLUDE_PROJECTS if they really are in %s) ---" % town)
+        for x in near_sorted[:60]:
+            say("      OUT  %s | %s | %dm | %s" % x)
+    else:
+        say("   IN (%d): %s" % (len(inc_sorted), "; ".join("%s (%dm)" % (x[0], x[2]) for x in inc_sorted[:40]) or "none"))
+        if near_sorted:
+            say("   OUT near misses (%d): %s" % (len(near_sorted), "; ".join("%s (%dm)" % (x[0], x[2]) for x in near_sorted[:12])))
     return {
         "cols": ["ym", "project", "type", "tenure", "sale", "floor", "sqm", "price"],
         "projects": projects, "types": types, "tenures": tenures,
@@ -294,13 +326,24 @@ def build_private(town, blocks):
 
 
 # ------------------------------------------------------------------ main
-def build_one(town):
+def write_json(path, payload):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+
+
+def build_one(town, raw_rows, map_slugs, verbose):
     say("")
     say("== %s ==" % town)
-    slug, blocks = town_slug_and_blocks(town)
-    say("   slug %s, %d HDB blocks with coordinates" % (slug, len(blocks)))
-    hdb = build_hdb(town)
-    private = build_private(town, blocks)
+    if len(raw_rows) < MIN_HDB_ROWS:
+        raise RuntimeError("only %d HDB sales found for %s" % (len(raw_rows), town))
+    slug = slugify(town)
+    blocks = town_blocks(town, map_slugs)
+    hdb = pack_hdb(raw_rows)
+    say("   %d HDB sales, %s to %s, %d blocks with map coordinates" %
+        (len(hdb["rows"]), min(r[0] for r in hdb["rows"]), max(r[0] for r in hdb["rows"]), len(blocks)))
+    private = build_private(town, blocks, verbose)
     payload = {
         "v": 1,
         "town": town,
@@ -320,24 +363,52 @@ def build_one(town):
                        "Area for landed homes is usually land area." % MAX_PRIVATE_DISTANCE_M,
         },
     }
-    os.makedirs(OUT_DIR, exist_ok=True)
     out_path = os.path.join(OUT_DIR, slug + ".json")
-    tmp = out_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, out_path)
+    write_json(out_path, payload)
     say("   wrote %s (%.0f KB)" % (out_path, os.path.getsize(out_path) / 1024.0))
-    return slug
+    return {
+        "name": town, "slug": slug,
+        "hdb_sales": len(hdb["rows"]), "hdb_through_ym": payload["hdb_through_ym"],
+        "private_sales": len(private["rows"]), "private_status": private["status"],
+    }
 
 
 def main():
-    towns = sys.argv[1:] or ["Bukit Panjang"]
     say("Miji town page data builder | %s" % time.strftime("%Y-%m-%d %H:%M"))
-    done = []
-    for t in towns:
-        done.append(build_one(t))
+    by_town, names = read_hdb_all()
+    wanted = sys.argv[1:]
+    if wanted:
+        keys = []
+        for w in wanted:
+            k = w.strip().upper()
+            if k not in by_town:
+                say("NOTE: %r was not found in the HDB data, so it was skipped." % w)
+                continue
+            keys.append(k)
+    else:
+        keys = sorted(by_town)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    map_slugs = map_towns()
+    verbose = len(keys) == 1
+    built, failed = [], []
+    for k in keys:
+        town = names[k]
+        try:
+            built.append(build_one(town, by_town[k], map_slugs, verbose))
+        except Exception as e:
+            failed.append(town)
+            say("   SKIPPED %s: %s: %s" % (town, type(e).__name__, e))
+    if built and not wanted:
+        write_json(os.path.join(OUT_DIR, "index.json"), {
+            "built": time.strftime("%Y-%m-%d"),
+            "towns": sorted(built, key=lambda t: t["name"]),
+        })
     say("")
-    say("Done: %s" % ", ".join(done))
+    say("Done: %d towns built%s" % (len(built), (", %d skipped: %s" % (len(failed), ", ".join(failed))) if failed else ""))
+    if not wanted and len(built) < MIN_TOWNS:
+        raise SystemExit("STOP: only %d towns were built (expected %d or more)." % (len(built), MIN_TOWNS))
+    if wanted and not built:
+        raise SystemExit("STOP: none of the requested towns could be built.")
 
 
 if __name__ == "__main__":
