@@ -138,6 +138,21 @@ MATCH_MIN_PROJECTS = 3     # ...and at least this many matched projects are need
 MATCH_MIN_COVERAGE = 0.25  # ...covering at least this share of the later slot's resale sales
 MATCH_MIN_REAL_SLOTS = 3   # fewer real chained slots than this -> fall back to the pooled median
 
+# ---- HDB "same-age flats" (matched lease-year group) method ------------------------------------
+# Same idea as the condo method above, but the like-for-like key is the flat's lease commencement
+# year, grouped into HDB_BAND_YEARS-year bands (e.g. 1965-69, 2015-19): a town's 2-room median can
+# jump simply because a batch of newer flats became resalable and sold alongside 1960s-70s flats
+# (found for real: Queenstown 2-room, $300K -> $518K, ~20 sales a year, flats with ~39 vs ~94 years
+# of lease left). Each band is compared only with ITSELF across neighbouring slots, and the band
+# changes are blended (weighted by sales). Bands with no sales in both slots are left out of the
+# trend. The latest slot's plain median stays the anchor; earlier slots are chain-linked from it.
+HDB_BAND_YEARS = 5
+HDB_MATCH_MIN_N = 3          # a band needs at least this many sales in BOTH slots to count
+HDB_MATCH_MIN_BANDS = 2      # at least this many matched bands to trust a link
+HDB_MATCH_MIN_COVERAGE = 0.25  # ...covering at least this share of the later slot's sales
+HDB_MATCH_MIN_REAL_SLOTS = 3   # chain must reach every slot that has sales, and at least this many
+HDB_METHOD = {}              # (town, flat_type) -> "matched" | "pooled" - read back in main()
+
 RECENT_MONTHS = 8   # how far back "Check a Unit" comparables look - matches the site copy
                      # ("sold in the past 8 months"). Independent of YEARS/CURRENT_SLOT above -
                      # this feeds a different output file (recent_transactions.json), not the Index.
@@ -332,6 +347,70 @@ def matched_series(slot_entries, ordered_slots):
     return out
 
 
+def matched_link_generic(items_a, items_b, min_n, min_keys, min_cov):
+    """items_*: [(value, key), ...]. Like-for-like change from slot A to slot B using keys that
+    have at least min_n items in BOTH. Returns None unless there are >= min_keys such keys covering
+    >= min_cov of slot B's items; else {"ratio", "keys", "coverage"}."""
+    if not items_a or not items_b:
+        return None
+    by_a, by_b = defaultdict(list), defaultdict(list)
+    for v, k in items_a:
+        if k is not None:
+            by_a[k].append(v)
+    for v, k in items_b:
+        if k is not None:
+            by_b[k].append(v)
+    num = den = 0.0
+    nk = covered = 0
+    for k, va in by_a.items():
+        vb = by_b.get(k)
+        if not vb or len(va) < min_n or len(vb) < min_n:
+            continue
+        ma, mb = median(va), median(vb)
+        if not ma or not mb or ma <= 0 or mb <= 0:
+            continue
+        w = min(len(va), len(vb))
+        num += w * math.log(mb / ma)
+        den += w
+        nk += 1
+        covered += len(vb)
+    if nk < min_keys or den <= 0:
+        return None
+    cov = covered / len(items_b)
+    if cov < min_cov:
+        return None
+    return {"ratio": math.exp(num / den), "keys": nk, "coverage": round(cov, 3)}
+
+
+def matched_chain_generic(slot_items, ordered_slots, min_n, min_keys, min_cov):
+    """slot_items: {slot: [(value, key), ...]}. Anchors on the latest slot that has items (its
+    plain median is the level) and chain-links BACKWARDS only. Returns {slot: {"med", "match"}}
+    for every slot the chain reaches; "match" (on the newer slot of each link) = {"projects": number
+    of matched keys, "coverage": share of that slot's sales}."""
+    anchor = None
+    for i in range(len(ordered_slots) - 1, -1, -1):
+        if slot_items.get(ordered_slots[i]):
+            anchor = i
+            break
+    if anchor is None:
+        return {}
+    a_slot = ordered_slots[anchor]
+    level = float(median([v for v, _k in slot_items[a_slot]]))
+    out = {a_slot: {"med": int(round(level)), "match": None}}
+    for i in range(anchor - 1, -1, -1):
+        s_i = ordered_slots[i]
+        if not slot_items.get(s_i):
+            break
+        lk = matched_link_generic(slot_items[s_i], slot_items[ordered_slots[i + 1]], min_n, min_keys, min_cov)
+        if not lk:
+            break
+        level = level / lk["ratio"]
+        out[s_i] = {"med": int(round(level)), "match": None}
+        out[ordered_slots[i + 1]]["match"] = {"projects": lk["keys"], "coverage": lk["coverage"],
+                                               "unit": "groups of same-age flats"}
+    return out
+
+
 # ------------------------------------------------------------------ trailing-12-month window
 def add_months(y, m, delta):
     idx = (y * 12 + (m - 1)) + delta
@@ -467,8 +546,8 @@ def build_hdb_medians(ttm_months):
     - years are never hidden just because sales were few, only when there were truly none."""
     path = download_hdb_csv()
     say("Aggregating HDB resale prices by town, flat type and year...")
-    cal_buckets = defaultdict(list)   # (town, ft, year) -> [prices], year in CALENDAR_YEARS
-    ttm_buckets = defaultdict(list)   # (town, ft) -> [prices] inside the trailing-12-month window
+    cal_buckets = defaultdict(list)   # (town, ft, year) -> [(price, lease_band)], year in CALENDAR_YEARS
+    ttm_buckets = defaultdict(list)   # (town, ft) -> [(price, lease_band)] inside the trailing-12-month window
     rows_seen = 0
     for row in parse_csv_rows(path):
         rows_seen += 1
@@ -489,24 +568,64 @@ def build_hdb_medians(ttm_months):
         town = (row.get("town") or "").strip().title().replace("Hdb", "HDB")
         # Fix a couple of data.gov.sg's town spellings to match the site's display names
         town = {"Kallang/Whampoa": "Kallang/Whampoa", "Central Area": "Central Area"}.get(town, town)
+        band = None
+        try:
+            lc = int(float(row.get("lease_commence_date") or 0))
+            if 1900 < lc < 2100:
+                band = (lc // HDB_BAND_YEARS) * HDB_BAND_YEARS
+        except ValueError:
+            pass
         if year in CALENDAR_YEARS:
-            cal_buckets[(town, ft, year)].append(price)
+            cal_buckets[(town, ft, year)].append((price, band))
         if (year, mon) in ttm_months:
-            ttm_buckets[(town, ft)].append(price)
+            ttm_buckets[(town, ft)].append((price, band))
     if rows_seen < 100000:
         raise SystemExit("STOP: only read %d rows from the HDB dataset (expected several hundred thousand). "
                           "The download may be incomplete - existing index data was left untouched." % rows_seen)
     say("   read %d transaction rows" % rows_seen)
 
+    ordered = sorted(CALENDAR_YEARS) + [CURRENT_SLOT]
+    combos = defaultdict(dict)   # (town, ft) -> {slot: [(price, band), ...]}
+    for (town, ft, year), items in cal_buckets.items():
+        combos[(town, ft)][year] = items
+    for (town, ft), items in ttm_buckets.items():
+        combos[(town, ft)][CURRENT_SLOT] = items
+
     out = defaultdict(lambda: defaultdict(dict))
-    for (town, ft, year), prices in cal_buckets.items():
-        s = stats_for(prices)
-        if s:
-            out[town][ft][year] = s
-    for (town, ft), prices in ttm_buckets.items():
-        s = stats_for(prices)
-        if s:
-            out[town][ft][CURRENT_SLOT] = s
+    n_matched = n_pooled = 0
+    for (town, ft), slot_items in combos.items():
+        chain = matched_chain_generic(slot_items, ordered, HDB_MATCH_MIN_N, HDB_MATCH_MIN_BANDS,
+                                      HDB_MATCH_MIN_COVERAGE)
+        have = [s_ for s_ in ordered if slot_items.get(s_)]
+        use_matched = len(chain) >= HDB_MATCH_MIN_REAL_SLOTS and all(s_ in chain for s_ in have)
+        slots = {}
+        for slot in have:
+            prices = [pr for pr, _b in slot_items[slot]]
+            raw = stats_for(prices)
+            if not raw:
+                continue
+            if use_matched:
+                f = chain[slot]["med"] / raw["med"] if raw["med"] else 1.0
+                st = {"n": raw["n"], "med": chain[slot]["med"],
+                      "p25": int(round(raw["p25"] * f)), "p75": int(round(raw["p75"] * f)),
+                      "raw_med": raw["med"], "raw_n": raw["n"]}
+                if chain[slot].get("match"):
+                    st["match"] = chain[slot]["match"]
+            else:
+                st = dict(raw)
+                st["raw_med"] = raw["med"]
+                st["raw_n"] = raw["n"]
+            slots[slot] = st
+        if not slots:
+            continue
+        out[town][ft] = slots
+        HDB_METHOD[(town, ft)] = "matched" if use_matched else "pooled"
+        if use_matched:
+            n_matched += 1
+        else:
+            n_pooled += 1
+    say("   HDB like-for-like (same-age flats): %d town/flat-type series matched, %d fell back to the plain median" %
+        (n_matched, n_pooled))
     return out, sorted(set(t for t, _, _ in cal_buckets) | set(t for t, _ in ttm_buckets))
 
 
@@ -1208,6 +1327,7 @@ def main():
             slots = by_type.get(ft, {})
             if len(slots) >= MIN_YEARS_PRESENT:
                 entry[ft] = slots_to_entry(slots)
+                entry[ft]["method"] = HDB_METHOD.get((town, ft), "pooled")
             elif slots:
                 # There WAS at least one real sale somewhere in the YEARS window, just not in enough
                 # different years to draw a trend line (need >=2). Not the same as zero sales ever -
@@ -1249,7 +1369,11 @@ def main():
         "sources": {
             "hdb": "Housing & Development Board (HDB), Resale Flat Prices, via data.gov.sg. "
                    "Every registered resale transaction, median per town/flat type/year (25th-75th "
-                   "percentile and sale count included). Singapore Open Data Licence - free for "
+                   "percentile and sale count included). Price changes are like-for-like by flat "
+                   "age: flats are grouped by lease start year (5-year bands), each band is compared "
+                   "only with itself across periods and the changes are blended, so a batch of newer "
+                   "flats selling one year doesn't read as a price jump; the plain all-sales median "
+                   "is kept alongside as 'raw'. Singapore Open Data Licence - free for "
                    "personal or commercial use.",
             "private": "Urban Redevelopment Authority (URA), Private Residential Property "
                        "Transactions, via the URA Data Service API. Condo figures are a like-for-like "
