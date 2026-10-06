@@ -118,13 +118,59 @@ def town_blocks(town, map_slugs):
 
 
 # ------------------------------------------------------------------ HDB
-def ensure_hdb_csv(tries=40, wait=15):
+def fetch_hdb_by_pages(path):
+    """Plan B when the "prepare a download" route stays stuck on STARTING: read the same dataset
+    page by page (5,000 rows at a time) from data.gov.sg's table API and save it as the same CSV."""
+    import csv
+    import urllib.error
+    base = "https://data.gov.sg/api/action/datastore_search?resource_id=%s&limit=%d&offset=%d"
+    limit, offset, total, rows, fields = 5000, 0, None, [], None
+    say("Plan B: reading the HDB resale table page by page from data.gov.sg...")
+    while True:
+        d = None
+        for attempt in range(1, 9):
+            try:
+                d = json.loads(mib.http_get(base % (mib.HDB_DATASET_ID, limit, offset), timeout=120))
+                break
+            except urllib.error.HTTPError as e:
+                say("   page at row %d: HTTP %s, waiting 15s (try %d of 8)" % (offset, e.code, attempt))
+                time.sleep(15)
+            except Exception as e:
+                say("   page at row %d: %s: %s, waiting 10s (try %d of 8)" % (offset, type(e).__name__, e, attempt))
+                time.sleep(10)
+        if d is None:
+            raise SystemExit("Plan B also failed: could not read the HDB table at row %d." % offset)
+        res = d.get("result") or {}
+        recs = res.get("records") or []
+        if total is None:
+            total = res.get("total")
+            say("   data.gov.sg says the table has %s rows" % total)
+        if not recs:
+            break
+        if fields is None:
+            fields = [k for k in recs[0].keys() if k != "_id"]
+        rows.extend(recs)
+        offset += len(recs)
+        if offset % 25000 < limit:
+            say("   ...%d rows so far" % offset)
+        if total is not None and offset >= int(total):
+            break
+        time.sleep(1)
+    if len(rows) < 1000 or not fields:
+        raise SystemExit("Plan B only got %d rows, which is too few to trust." % len(rows))
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    say("   saved %d rows" % len(rows))
+
+
+def ensure_hdb_csv(tries=8, wait=15):
     """data.gov.sg does not hand over the file straight away: it has to prepare the download first
-    (status STARTING), then gives the link. A job that nobody has asked data.gov.sg to prepare a file
-    for can sit on STARTING, so this first asks it to START preparing (initiate-download), then
-    checks every few seconds until the link arrives, then saves the file where
-    miji_index_build.py's own downloader looks for it, so the normal download call right after this
-    just uses the saved copy."""
+    (status STARTING), then gives the link. This asks it to START preparing (initiate-download), then
+    checks every few seconds. If it is still stuck after about 2 minutes it switches to Plan B
+    (reading the table page by page). The result is saved where miji_index_build.py's own
+    downloader looks for it, so the normal download call right after this just uses the saved copy."""
     path = mib.hdb_cache_path()
     if os.path.exists(path) and (time.time() - os.path.getmtime(path)) < mib.CACHE_HOURS * 3600:
         say("Using the HDB resale copy saved earlier today (%s)" % path)
@@ -137,24 +183,28 @@ def ensure_hdb_csv(tries=40, wait=15):
         say("   asked data.gov.sg to start preparing the HDB file: %s" % json.dumps(d0)[:200])
     except Exception as e:
         say("   NOTE: could not send the start request (%s: %s). Carrying on with checking." % (type(e).__name__, e))
-    url = ""
+    url, d = "", {}
     for i in range(1, tries + 1):
-        d = mib.get_json(poll_url, label="HDB dataset poll-download")
+        try:
+            d = mib.get_json(poll_url, label="HDB dataset poll-download")
+        except Exception as e:
+            say("   NOTE: check failed (%s: %s)" % (type(e).__name__, e))
+            d = {}
         url = ((d.get("data") or {}).get("url") or "")
         if url:
             break
-        if i % 4 == 1:
-            say("   data.gov.sg says: %s" % json.dumps(d)[:200])
+        say("   data.gov.sg says: %s" % json.dumps(d)[:200])
         say("   still preparing the HDB file. Waiting %ds, check %d of %d..." % (wait, i, tries))
         time.sleep(wait)
-    if not url:
-        raise SystemExit("data.gov.sg still had not prepared the HDB resale file after %d checks (about %d minutes). "
-                         "Last reply: %s" % (tries, tries * wait // 60, json.dumps(d)[:300]))
-    say("Downloading the full HDB resale history...")
-    raw = mib.http_get(url, timeout=300)
-    with open(path, "wb") as f:
-        f.write(raw)
-    say("   saved %.1f MB" % (len(raw) / 1e6))
+    if url:
+        say("Downloading the full HDB resale history...")
+        raw = mib.http_get(url, timeout=300)
+        with open(path, "wb") as f:
+            f.write(raw)
+        say("   saved %.1f MB" % (len(raw) / 1e6))
+        return
+    say("The download route is stuck (last reply: %s). Switching to Plan B." % json.dumps(d)[:200])
+    fetch_hdb_by_pages(path)
 
 
 def read_hdb_all():
