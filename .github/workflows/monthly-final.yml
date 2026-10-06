@@ -1,0 +1,108 @@
+name: Monthly final numbers
+
+# Why this exists, separate from weekly-highlights.yml:
+#   The weekly job always republishes "the latest month in the data" - which is a moving target.
+#   On the 1st it flips to a brand-new month with almost no rows, and the month that just ended is
+#   no longer on the page. The numbers you quote in monthly snapshots and social posts need the
+#   month that JUST ENDED, rebuilt after HDB/URA have had time to publish it, and kept in a file
+#   that doesn't get overwritten by next month's data.
+#
+# What it does: on the 2nd, 10th and 20th of every month, builds LAST month's numbers with
+# `miji_weekly_highlights.py --month YYYY-MM` and saves them to
+#     index_data/monthly_final/YYYY-MM.json     (one permanent file per month)
+#     index_data/monthly_final_latest.json      (always the most recent month's file)
+# HDB numbers are by registration month, so once a month ends no new transactions can be registered
+# in it - the 2nd (a day after, so data.gov.sg's daily update has landed) should already be the full
+# HDB count. URA private-property data is slower (their caveats arrive in batches), so the 10th and
+# 20th stay as catch-up runs; each one overwrites the one before. The row counts are written into each commit message, so you can see in the
+# repo history whether the number moved between the 2nd, 10th and 20th (that tells you how late
+# data really arrives, and whether the extra runs are worth keeping).
+#
+# Counts are by the month HDB/URA REGISTERED the transaction (that's the only date their data
+# carries), which is not always the month the sale happened - other websites that count by sale
+# date will show different numbers. Label reports "registered in <month>".
+
+on:
+  schedule:
+    - cron: '0 4 2,10,20 * *'   # the 2nd, 10th and 20th, 12:00 noon Singapore time (04:00 UTC = 12:00 SGT)
+  workflow_dispatch:           # "Run workflow" button; type a month like 2026-09 to rebuild a specific one
+    inputs:
+      month:
+        description: 'Month to build, like 2026-09 (leave blank for last month)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monthly-final-numbers
+  cancel-in-progress: false
+
+jobs:
+  monthly-final:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Work out which month to build
+        id: month
+        env:
+          INPUT_MONTH: ${{ github.event.inputs.month }}
+        run: |
+          if [ -n "$INPUT_MONTH" ]; then
+            M="$INPUT_MONTH"
+          else
+            M=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m)
+          fi
+          echo "Building $M"
+          echo "month=$M" >> "$GITHUB_OUTPUT"
+
+      - name: Build the month's final numbers
+        timeout-minutes: 20
+        env:
+          URA_ACCESS_KEY: ${{ secrets.URA_ACCESS_KEY }}
+          PYTHONUNBUFFERED: '1'
+        run: python3 miji_weekly_highlights.py --month "${{ steps.month.outputs.month }}"
+
+      - name: Check the new data before using it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          month = "${{ steps.month.outputs.month }}"
+          path = "index_data/monthly_final/%s.json" % month
+          if not os.path.exists(path):
+              sys.exit("STOP: no %s. Nothing was published." % path)
+          with open(path, encoding="utf-8") as f:
+              d = json.load(f)
+          if d.get("kind") != "monthly_final" or d.get("registered_month") != month or "hdb" not in d:
+              sys.exit("STOP: %s doesn't look right." % path)
+          hdb = d["hdb"].get("count")
+          above = d["hdb"].get("above_1m_count")
+          priv = d["private"].get("count")
+          print("OK: %s, HDB rows=%s, HDB $1M+=%s, private rows=%s" % (month, hdb, above, priv))
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("SUMMARY=%s: HDB %s rows, %s at $1M+, private %s rows\n" % (month, hdb, above, priv))
+          PY
+
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index_data/monthly_final index_data/monthly_final_latest.json
+          if git diff --cached --quiet; then
+            echo "Nothing changed since the last run."
+          else
+            git commit -m "Monthly final $SUMMARY"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME"
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
+
+      - name: Ask jsdelivr to refresh its cached copy
+        run: |
+          curl -s -o /dev/null "https://purge.jsdelivr.net/gh/timothylawrencewong/sg-hdb-map-data@main/index_data/monthly_final_latest.json" || true
