@@ -60,6 +60,11 @@ MIN_HDB_ROWS = 500     # a sane floor for "6 months of nationwide HDB resales" -
                        # real number, just enough to catch a badly broken/partial download
 MIN_PRIVATE_ROWS = 150  # same idea for URA - lower bar since private volumes are smaller
 MILLION = 1_000_000
+NEW_MONTH_MIN_SHARE = 0.5   # a brand-new month only replaces last month on the page once it has at
+                             # least this share of last month's HDB resale count - until then the
+                             # page keeps showing last month's (near-final) numbers, so the first
+                             # days of a month don't show "Busiest town: 18 resales" as if that
+                             # were a full month
 REGION_ORDER = ["CCR", "RCR", "OCR"]   # fixed display order (URA's own convention), not sorted by
                                         # count - so the region mini-grid doesn't reshuffle week to week
 
@@ -284,16 +289,57 @@ def latest_month_rows(rows):
     return [r for r in rows if r["ym"] == latest_ym], latest_ym
 
 
+def parse_args(argv):
+    """Optional: --month YYYY-MM  builds that specific month (used by the monthly "final numbers"
+    job) instead of whatever the latest month in the data is. Returns that month as the same
+    year*100+month number the rows carry in r["ym"], or None for the normal weekly behaviour."""
+    for i, a in enumerate(argv):
+        if a == "--month":
+            if i + 1 >= len(argv):
+                raise SystemExit("STOP: --month needs a value like 2026-09.")
+            val = argv[i + 1].strip()
+            if len(val) != 7 or val[4] != "-" or not (val[:4] + val[5:]).isdigit() or not (1 <= int(val[5:]) <= 12):
+                raise SystemExit("STOP: --month must look like 2026-09, got %r." % val)
+            return int(val[:4]) * 100 + int(val[5:])
+    return None
+
+
+def month_rows(rows, target_ym):
+    """target_ym None -> the latest month present (weekly behaviour, unchanged). Otherwise exactly
+    that month, and a clear stop if it isn't in the data (so a monthly run never silently publishes
+    a different month under the wrong name)."""
+    if target_ym is None:
+        return latest_month_rows(rows)
+    picked = [r for r in rows if r["ym"] == target_ym]
+    if not picked:
+        raise SystemExit("STOP: no rows for %s in the data pulled." % ym_label(target_ym))
+    return picked, target_ym
+
+
 def main():
     say("Weekly market update builder | Python %s | %s" % (sys.version.split()[0], time.strftime("%Y-%m-%d %H:%M")))
     os.makedirs(OUT_DIR, exist_ok=True)
+    target_ym = parse_args(sys.argv[1:])
+    if target_ym:
+        say("   Monthly final mode: building %s" % ym_label(target_ym))
     cutoff_ym = month_cutoff_ym()
 
     hdb_all = hdb_rows(cutoff_ym)
     if len(hdb_all) < MIN_HDB_ROWS:
         raise SystemExit("STOP: only %d HDB rows in the last %d months (expected several thousand). "
                           "The HDB download may be incomplete - nothing was changed." % (len(hdb_all), LOOKBACK_MONTHS))
-    month_hdb, hdb_ym = latest_month_rows(hdb_all)
+    month_hdb, hdb_ym = month_rows(hdb_all, target_ym)
+    month_note = None
+    if target_ym is None and month_hdb:
+        py, pm = midx.add_months(hdb_ym // 100, hdb_ym % 100, -1)
+        prev_ym = py * 100 + pm
+        prev_rows = [r for r in hdb_all if r["ym"] == prev_ym]
+        if prev_rows and len(month_hdb) < NEW_MONTH_MIN_SHARE * len(prev_rows):
+            month_note = ("%s has only %d HDB resales registered so far (%s had %d), so this page shows %s "
+                          "until %s fills in." % (ym_label(hdb_ym), len(month_hdb), ym_label(prev_ym),
+                                                   len(prev_rows), ym_label(prev_ym), ym_label(hdb_ym)))
+            say("   " + month_note)
+            month_hdb, hdb_ym = prev_rows, prev_ym
     hdb_month_label = ym_label(hdb_ym)
     say("   %d HDB rows for %s" % (len(month_hdb), hdb_month_label))
 
@@ -301,7 +347,7 @@ def main():
     priv_month_label = None
     try:
         priv_all = private_rows(cutoff_ym)
-        month_priv, priv_ym = latest_month_rows(priv_all)
+        month_priv, priv_ym = month_rows(priv_all, target_ym)
         priv_month_label = ym_label(priv_ym)
         say("   %d private-property rows for %s" % (len(month_priv), priv_month_label))
     except SystemExit as e:
@@ -348,10 +394,23 @@ def main():
         },
     }
 
-    path = os.path.join(OUT_DIR, "weekly_highlights.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
-    say("Wrote %s" % path)
+    if month_note:
+        out["month_note"] = month_note
+    if target_ym:
+        ym_str = "%04d-%02d" % (target_ym // 100, target_ym % 100)
+        out["kind"] = "monthly_final"
+        out["registered_month"] = ym_str
+        out["note"] = ("Counts are by the month HDB/URA registered the transaction, as published at generated_at. "
+                       "Re-built on a schedule, so later runs can pick up transactions published after earlier ones.")
+        final_dir = os.path.join(OUT_DIR, "monthly_final")
+        os.makedirs(final_dir, exist_ok=True)
+        paths = [os.path.join(final_dir, ym_str + ".json"), os.path.join(OUT_DIR, "monthly_final_latest.json")]
+    else:
+        paths = [os.path.join(OUT_DIR, "weekly_highlights.json")]
+    for path in paths:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+        say("Wrote %s" % path)
 
 
 if __name__ == "__main__":
