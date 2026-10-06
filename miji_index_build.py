@@ -140,15 +140,15 @@ MATCH_MIN_REAL_SLOTS = 3   # fewer real chained slots than this -> fall back to 
 
 # ---- HDB "same-age flats" (matched lease-year group) method ------------------------------------
 # Same idea as the condo method above, but the like-for-like key is the flat's lease commencement
-# year, grouped into HDB_BAND_YEARS-year bands (e.g. 1965-69, 2015-19): a town's 2-room median can
+# year, grouped into age bands (5 years, e.g. 1965-69; widened to 10 then 20 years for thin series): a town's 2-room median can
 # jump simply because a batch of newer flats became resalable and sold alongside 1960s-70s flats
 # (found for real: Queenstown 2-room, $300K -> $518K, ~20 sales a year, flats with ~39 vs ~94 years
 # of lease left). Each band is compared only with ITSELF across neighbouring slots, and the band
 # changes are blended (weighted by sales). Bands with no sales in both slots are left out of the
 # trend. The latest slot's plain median stays the anchor; earlier slots are chain-linked from it.
-HDB_BAND_YEARS = 5
+HDB_BAND_LADDER = [5, 10, 20]   # try 5-year age groups first; if too few groups repeat, widen to 10, then 20
 HDB_MATCH_MIN_N = 3          # a band needs at least this many sales in BOTH slots to count
-HDB_MATCH_MIN_BANDS = 2      # at least this many matched bands to trust a link
+HDB_MATCH_MIN_BANDS = 2      # at least this many matched bands to trust a link (1 is allowed at the widest band)
 HDB_MATCH_MIN_COVERAGE = 0.25  # ...covering at least this share of the later slot's sales
 HDB_MATCH_MIN_REAL_SLOTS = 3   # chain must reach every slot that has sales, and at least this many
 HDB_METHOD = {}              # (town, flat_type) -> "matched" | "pooled" - read back in main()
@@ -568,17 +568,17 @@ def build_hdb_medians(ttm_months):
         town = (row.get("town") or "").strip().title().replace("Hdb", "HDB")
         # Fix a couple of data.gov.sg's town spellings to match the site's display names
         town = {"Kallang/Whampoa": "Kallang/Whampoa", "Central Area": "Central Area"}.get(town, town)
-        band = None
+        lease_year = None
         try:
             lc = int(float(row.get("lease_commence_date") or 0))
             if 1900 < lc < 2100:
-                band = (lc // HDB_BAND_YEARS) * HDB_BAND_YEARS
+                lease_year = lc
         except ValueError:
             pass
         if year in CALENDAR_YEARS:
-            cal_buckets[(town, ft, year)].append((price, band))
+            cal_buckets[(town, ft, year)].append((price, lease_year))
         if (year, mon) in ttm_months:
-            ttm_buckets[(town, ft)].append((price, band))
+            ttm_buckets[(town, ft)].append((price, lease_year))
     if rows_seen < 100000:
         raise SystemExit("STOP: only read %d rows from the HDB dataset (expected several hundred thousand). "
                           "The download may be incomplete - existing index data was left untouched." % rows_seen)
@@ -593,11 +593,19 @@ def build_hdb_medians(ttm_months):
 
     out = defaultdict(lambda: defaultdict(dict))
     n_matched = n_pooled = 0
+    width_counts = defaultdict(int)
     for (town, ft), slot_items in combos.items():
-        chain = matched_chain_generic(slot_items, ordered, HDB_MATCH_MIN_N, HDB_MATCH_MIN_BANDS,
-                                      HDB_MATCH_MIN_COVERAGE)
         have = [s_ for s_ in ordered if slot_items.get(s_)]
-        use_matched = len(chain) >= HDB_MATCH_MIN_REAL_SLOTS and all(s_ in chain for s_ in have)
+        chain, use_matched, used_width = {}, False, None
+        for wi, width in enumerate(HDB_BAND_LADDER):
+            banded = {sl: [(pr, ((ly // width) * width) if ly else None) for pr, ly in items]
+                      for sl, items in slot_items.items()}
+            widest = (wi == len(HDB_BAND_LADDER) - 1)
+            ch = matched_chain_generic(banded, ordered, HDB_MATCH_MIN_N,
+                                       1 if widest else HDB_MATCH_MIN_BANDS, HDB_MATCH_MIN_COVERAGE)
+            if len(ch) >= HDB_MATCH_MIN_REAL_SLOTS and all(s_ in ch for s_ in have):
+                chain, use_matched, used_width = ch, True, width
+                break
         slots = {}
         for slot in have:
             prices = [pr for pr, _b in slot_items[slot]]
@@ -622,10 +630,12 @@ def build_hdb_medians(ttm_months):
         HDB_METHOD[(town, ft)] = "matched" if use_matched else "pooled"
         if use_matched:
             n_matched += 1
+            width_counts[used_width] += 1
         else:
             n_pooled += 1
     say("   HDB like-for-like (same-age flats): %d town/flat-type series matched, %d fell back to the plain median" %
         (n_matched, n_pooled))
+    say("      age-group width used: %s" % ", ".join("%d-year: %d" % (w, width_counts[w]) for w in HDB_BAND_LADDER))
     return out, sorted(set(t for t, _, _ in cal_buckets) | set(t for t, _ in ttm_buckets))
 
 
