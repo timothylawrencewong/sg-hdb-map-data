@@ -37,6 +37,7 @@ ura_build.py:
 Standard library only, nothing to install.
 """
 
+import calendar
 import json
 import os
 import sys
@@ -399,8 +400,18 @@ def main():
         ym_str = "%04d-%02d" % (target_ym // 100, target_ym % 100)
         out["kind"] = "monthly_final"
         out["registered_month"] = ym_str
-        out["note"] = ("Counts are by the month HDB/URA registered the transaction, as published at generated_at. "
-                       "Re-built on a schedule, so later runs can pick up transactions published after earlier ones.")
+        y, m = target_ym // 100, target_ym % 100
+        last_day = calendar.monthrange(y, m)[1]
+        month_name = calendar.month_name[m]
+        out["period_start"] = "%04d-%02d-01" % (y, m)
+        out["period_end"] = "%04d-%02d-%02d" % (y, m, last_day)
+        out["period_label"] = "1 to %d %s %d" % (last_day, month_name, y)
+        out["data_as_of"] = time.strftime("%Y-%m-%d", time.gmtime())
+        out["note"] = ("Registered transactions for %s, as published by HDB/URA and pulled on %s. "
+                       "HDB and URA only record the registration MONTH, so this covers everything they "
+                       "registered in %s %d, and none of the following month. Re-built on a schedule, so later "
+                       "runs can pick up transactions published after earlier ones."
+                       % (out["period_label"], out["data_as_of"], month_name, y))
         final_dir = os.path.join(OUT_DIR, "monthly_final")
         os.makedirs(final_dir, exist_ok=True)
         paths = [os.path.join(final_dir, ym_str + ".json"), os.path.join(OUT_DIR, "monthly_final_latest.json")]
