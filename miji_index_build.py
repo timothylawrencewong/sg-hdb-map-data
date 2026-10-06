@@ -58,6 +58,7 @@ Standard library only, nothing to install.
 """
 
 import json
+import math
 import os
 import statistics
 import sys
@@ -119,6 +120,23 @@ NEW_LAUNCH_SHARE_THRESHOLD = 0.30   # new-sale share of a slot's volume that tri
 NEW_LAUNCH_MIN_N = 5                 # ...but only if there are at least this many new-sale rows -
                                       # a 2-of-3-sales "60% new launch" reading on a near-empty slot
                                       # is just noise the low-sample flag already covers on its own
+
+# ---- Condo "like-for-like" (matched-project) method -------------------------------------------
+# A plain pooled median swings with WHAT sold (a launch-heavy year vs a resale-heavy year), not
+# with what the same homes are worth. So the published Condo series is now built like a mini price
+# index instead: for each pair of neighbouring slots, only RESALE projects (new-launch sales are
+# excluded) that sold in BOTH slots are compared, each project against its own median $psf, and
+# the project-level changes are combined (weighted by how many sales each project had in both
+# slots) into one district-level change. Those changes are chain-linked backwards from the latest
+# slot's resale median, so the latest figure is a real resale price level and earlier years are
+# that level adjusted by like-for-like movement. The raw, all-sales pooled median is still kept
+# alongside ("raw") so the site can show what actually sold. If a district doesn't have enough
+# repeat projects to chain at least MATCH_MIN_REAL_SLOTS slots, it falls back to the old pooled
+# series and is marked method="pooled" (the site flags it).
+MATCH_MIN_N = 3            # a project needs at least this many resale sales in a slot to count as a match
+MATCH_MIN_PROJECTS = 3     # ...and at least this many matched projects are needed to trust a link
+MATCH_MIN_COVERAGE = 0.25  # ...covering at least this share of the later slot's resale sales
+MATCH_MIN_REAL_SLOTS = 3   # fewer real chained slots than this -> fall back to the pooled median
 
 RECENT_MONTHS = 8   # how far back "Check a Unit" comparables look - matches the site copy
                      # ("sold in the past 8 months"). Independent of YEARS/CURRENT_SLOT above -
@@ -234,6 +252,84 @@ def composition_for(entries):
         "resale_p25": resale_stats["p25"] if resale_stats else None,
         "resale_p75": resale_stats["p75"] if resale_stats else None,
     }
+
+
+def _projects_of(entries):
+    """resale entries -> {project_name: [psf, ...]}"""
+    by = defaultdict(list)
+    for psf, _st, name in entries:
+        by[name or "Unknown project"].append(psf)
+    return by
+
+
+def matched_link(entries_a, entries_b):
+    """Like-for-like change from slot A to slot B, using RESALE projects that sold in both.
+    entries_*: resale-only [(psf, saletype, project_name), ...]. Returns None when there aren't
+    enough repeat projects (or they cover too little of slot B's resale sales) to trust a link,
+    else {"ratio": B/A, "projects": k, "coverage": share of B's resale sales that were matched}."""
+    if not entries_a or not entries_b:
+        return None
+    pa, pb = _projects_of(entries_a), _projects_of(entries_b)
+    num = den = 0.0
+    k = covered = 0
+    for name, psfs_a in pa.items():
+        psfs_b = pb.get(name)
+        if not psfs_b or len(psfs_a) < MATCH_MIN_N or len(psfs_b) < MATCH_MIN_N:
+            continue
+        ma, mb = median(psfs_a), median(psfs_b)
+        if not ma or not mb or ma <= 0 or mb <= 0:
+            continue
+        w = min(len(psfs_a), len(psfs_b))
+        num += w * math.log(mb / ma)
+        den += w
+        k += 1
+        covered += len(psfs_b)
+    if k < MATCH_MIN_PROJECTS or den <= 0:
+        return None
+    coverage = covered / len(entries_b)
+    if coverage < MATCH_MIN_COVERAGE:
+        return None
+    return {"ratio": math.exp(num / den), "projects": k, "coverage": round(coverage, 3)}
+
+
+def matched_series(slot_entries, ordered_slots):
+    """slot_entries: {slot: [(psf, saletype, project_name), ...] ALL sales (launch + resale)}.
+    Returns {slot: {"med": like-for-like $psf, "resale": stats_for(resale), "match": {...}|None}}
+    for every slot the chain can reach, anchored on the latest slot that has any resale sales
+    (the latest slot's resale median is a real price level; earlier/later slots move from it by
+    the matched changes). Slots the chain can't reach are simply absent."""
+    resale = {s: [e for e in slot_entries.get(s, []) if e[1] != 1] for s in ordered_slots}
+    anchor = None
+    for i in range(len(ordered_slots) - 1, -1, -1):
+        if resale[ordered_slots[i]]:
+            anchor = i
+            break
+    if anchor is None:
+        return {}
+    a_slot = ordered_slots[anchor]
+    a_stats = stats_for([e[0] for e in resale[a_slot]])
+    out = {a_slot: {"med": a_stats["med"], "resale": a_stats, "match": None}}
+    level = float(a_stats["med"])
+    for i in range(anchor - 1, -1, -1):          # backwards: older slots
+        lk = matched_link(resale[ordered_slots[i]], resale[ordered_slots[i + 1]])
+        if not lk:
+            break
+        level = level / lk["ratio"]
+        s = ordered_slots[i]
+        out[s] = {"med": int(round(level)), "resale": stats_for([e[0] for e in resale[s]]),
+                  "match": None}
+        # the link INTO the newer slot is what describes how reliable the move to it was
+        out[ordered_slots[i + 1]]["match"] = {"projects": lk["projects"], "coverage": lk["coverage"]}
+    level = float(a_stats["med"])
+    for i in range(anchor + 1, len(ordered_slots)):  # forwards (only if the latest slot had no resale)
+        lk = matched_link(resale[ordered_slots[i - 1]], resale[ordered_slots[i]])
+        if not lk:
+            break
+        level = level * lk["ratio"]
+        s = ordered_slots[i]
+        out[s] = {"med": int(round(level)), "resale": stats_for([e[0] for e in resale[s]]),
+                  "match": {"projects": lk["projects"], "coverage": lk["coverage"]}}
+    return out
 
 
 # ------------------------------------------------------------------ trailing-12-month window
@@ -550,6 +646,7 @@ def build_private_medians(ttm_months):
         for group, label in (("condo", "Private (Condo)"),):
             # Landed is deliberately not computed here - see the module docstring's point 3.
             real = {}
+            slot_entries = {}
             for y in CALENDAR_YEARS:
                 # Pool the RAW sale entries across every district this town is assigned to before
                 # taking the median - not an average of pre-computed per-district medians, so a
@@ -557,21 +654,53 @@ def build_private_medians(ttm_months):
                 entries = []
                 for d in districts:
                     entries.extend(cal_buckets.get(d, {}).get(group, {}).get(y, []))
-                s = stats_for([e[0] for e in entries]) if entries else None
-                if s:
-                    comp = composition_for(entries)
-                    if comp:
-                        s["composition"] = comp
-                    real[y] = s
+                if entries:
+                    slot_entries[y] = entries
             ttm_entries = []
             for d in districts:
                 ttm_entries.extend(ttm_buckets.get(d, {}).get(group, []))
-            ttm_stats = stats_for([e[0] for e in ttm_entries]) if ttm_entries else None
-            if ttm_stats:
-                ttm_comp = composition_for(ttm_entries)
-                if ttm_comp:
-                    ttm_stats["composition"] = ttm_comp
-                real[CURRENT_SLOT] = ttm_stats
+            if ttm_entries:
+                slot_entries[CURRENT_SLOT] = ttm_entries
+            if not slot_entries:
+                continue
+
+            # 1) The like-for-like (matched resale projects) series - see MATCH_* constants.
+            ordered = sorted(CALENDAR_YEARS) + [CURRENT_SLOT]
+            matched = matched_series(slot_entries, ordered)
+            method = "pooled"
+            if len(matched) >= MATCH_MIN_REAL_SLOTS:
+                method = "matched"
+                for slot, m in matched.items():
+                    entries = slot_entries.get(slot, [])
+                    raw = stats_for([e[0] for e in entries])
+                    rs = m["resale"] or {}
+                    resale_med = rs.get("med")
+                    # scale the resale percentile band by the same factor as the median so the
+                    # published med / p25 / p75 stay on one consistent scale
+                    f = (m["med"] / resale_med) if resale_med else 1.0
+                    s = {"n": rs.get("n", 0), "med": m["med"],
+                         "p25": int(round(rs["p25"] * f)) if rs.get("p25") is not None else None,
+                         "p75": int(round(rs["p75"] * f)) if rs.get("p75") is not None else None,
+                         "raw_med": raw["med"] if raw else None,
+                         "raw_n": raw["n"] if raw else None}
+                    comp = composition_for(entries)
+                    if comp:
+                        s["composition"] = comp
+                    if m.get("match"):
+                        s["match"] = m["match"]
+                    real[slot] = s
+            else:
+                # 2) Not enough repeat resale projects to chain - fall back to the plain pooled
+                # median (the old behaviour), marked so the site can say it isn't like-for-like.
+                for slot, entries in slot_entries.items():
+                    s = stats_for([e[0] for e in entries])
+                    if s:
+                        comp = composition_for(entries)
+                        if comp:
+                            s["composition"] = comp
+                        s["raw_med"] = s["med"]
+                        s["raw_n"] = s["n"]
+                        real[slot] = s
             if not real:
                 continue
             # URA's Data Service only gives ~5 years back, AND the current window can still be
@@ -613,7 +742,7 @@ def build_private_medians(ttm_months):
                 if prv in filled:
                     filled[y] = {"n": 0, "med": int(round(filled[prv]["med"] * growth)), "p25": None, "p75": None}
                     est_slots.append(y)
-            out[town][label] = {"values": filled, "estimated_slots": sorted(est_slots)}
+            out[town][label] = {"values": filled, "estimated_slots": sorted(est_slots), "method": method}
         if not out[town]:
             del out[town]
     return out
@@ -1037,17 +1166,25 @@ def slots_to_entry(stats_by_slot, low_n=LOW_SAMPLE_N):
     is no longer published at all. Kept as a parameter rather than inlined in case a future,
     similarly-thin series needs its own bar again."""
     vals, ns, p25s, p75s, lows, comps = [], [], [], [], [], []
+    raws, matches = [], []
     for y in YEARS:
         s = stats_by_slot.get(y)
         if not s or s.get("med") is None:
             vals.append(None); ns.append(None); p25s.append(None); p75s.append(None); lows.append(False)
-            comps.append(None)
+            comps.append(None); raws.append(None); matches.append(None)
         else:
             vals.append(s["med"]); ns.append(s.get("n")); p25s.append(s.get("p25")); p75s.append(s.get("p75"))
             n = s.get("n") or 0
             lows.append(n < low_n)
             comps.append(s.get("composition"))
-    return {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows, "comp": comps}
+            raws.append({"med": s.get("raw_med"), "n": s.get("raw_n")} if s.get("raw_med") is not None else None)
+            matches.append(s.get("match"))
+    entry = {"vals": vals, "n": ns, "p25": p25s, "p75": p75s, "low": lows, "comp": comps}
+    # Only Condo slots carry these (the like-for-like method) - HDB entries stay exactly as before.
+    if any(r is not None for r in raws):
+        entry["raw"] = raws          # plain all-sales pooled median + sale count, per slot
+        entry["match"] = matches     # {"projects", "coverage"} for the link INTO each slot
+    return entry
 
 
 def main():
@@ -1081,6 +1218,7 @@ def main():
                 vals = d["values"]
                 if all(y in vals for y in YEARS):
                     entry[label] = slots_to_entry(vals)
+                    entry[label]["method"] = d.get("method", "pooled")
                     if town not in private_estimated:
                         private_estimated[town] = {}
                     private_estimated[town][label] = d["estimated_slots"]
@@ -1114,8 +1252,12 @@ def main():
                    "percentile and sale count included). Singapore Open Data Licence - free for "
                    "personal or commercial use.",
             "private": "Urban Redevelopment Authority (URA), Private Residential Property "
-                       "Transactions, via the URA Data Service API. Median $ per square foot, "
-                       "pooled from real transactions in the URA postal district(s) each town sits "
+                       "Transactions, via the URA Data Service API. Condo figures are a like-for-like "
+                       "resale $ per square foot: only resale projects that sold in both of two "
+                       "neighbouring periods are compared (each against its own median), the changes "
+                       "are combined and chain-linked back from the latest period's resale median; "
+                       "new-launch sales are excluded from the trend, and the plain all-sales median "
+                       "is kept alongside as 'raw'. Based on real transactions in the URA postal district(s) each town sits "
                        "in - the standard 28-district split, finer than URA's own 3-tier CCR/RCR/OCR "
                        "segments, though a handful of towns that share a district (or genuinely span "
                        "two) will still show the same or pooled numbers. An estimate, not an exact "
