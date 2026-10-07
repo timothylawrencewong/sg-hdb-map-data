@@ -153,8 +153,8 @@ HDB_MATCH_MIN_COVERAGE = 0.25  # ...covering at least this share of the later sl
 HDB_MATCH_MIN_REAL_SLOTS = 3   # chain must reach every slot that has sales, and at least this many
 HDB_METHOD = {}              # (town, flat_type) -> "matched" | "pooled" - read back in main()
 
-RECENT_MONTHS = 8   # how far back "Check a Unit" comparables look - matches the site copy
-                     # ("sold in the past 8 months"). Independent of YEARS/CURRENT_SLOT above -
+RECENT_MONTHS = 12  # how far back "Check a Unit" comparables look - matches the site copy
+                     # ("sold in the past 12 months"). Independent of YEARS/CURRENT_SLOT above -
                      # this feeds a different output file (recent_transactions.json), not the Index.
 
 FLAT_TYPES = ["2-room", "3-room", "4-room", "5-room", "Executive"]
