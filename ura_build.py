@@ -849,6 +849,23 @@ def build(refresh):
             "districts": index,
         }, f, ensure_ascii=False, separators=(",", ":"))
 
+    # Address list for the agent dashboard's suggestions (MijiAgentAuth.tsx reads
+    # private_data/private_directory.json): one entry per project/street that had a sale.
+    seen_dir, entries = set(), []
+    for d in sorted(by_district):
+        for p in by_district[d]:
+            ptype = Counter(t["ptype"] for t in p["tx"]).most_common(1)[0][0]
+            g = group_of(ptype)
+            key = (p["name"], p["street"], g)
+            if key in seen_dir or p["lat"] is None:
+                continue
+            seen_dir.add(key)
+            entries.append({"label": p["name"], "street": p["street"], "district": d,
+                            "group": g, "lat": p["lat"], "lng": p["lon"]})
+    with open(os.path.join(tmp, "private_directory.json"), "w", encoding="utf-8") as f:
+        json.dump({"built": built, "entries": entries}, f, ensure_ascii=False, separators=(",", ":"))
+    say("   %d addresses written to private_directory.json" % len(entries))
+
     # Swap in the new folder only once everything was written
     if os.path.isdir(OUT_DIR):
         for f in os.listdir(OUT_DIR):
