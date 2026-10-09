@@ -74,7 +74,14 @@ jobs:
       # shows the new numbers a bit later instead of immediately.
       - name: Ask jsdelivr to refresh its cached copy
         run: |
-          curl -s -o /dev/null "https://purge.jsdelivr.net/gh/timothylawrencewong/sg-hdb-map-data@main/index_data/weekly_highlights.json" || true
+          # Purging straight after the push can run before jsdelivr can see the new commit, so it
+          # re-caches the OLD file (found live: the page kept saying the previous run's date).
+          # Wait a minute, then purge three times a bit apart so the new copy is what gets cached.
+          sleep 60
+          for i in 1 2 3; do
+            curl -s -o /dev/null "https://purge.jsdelivr.net/gh/timothylawrencewong/sg-hdb-map-data@main/index_data/weekly_highlights.json" || true
+            sleep 20
+          done
 
       # Sends the weekly email. NOTE: the JSON schema this posts changed with this update
       # (week_label/first_run/hdb.new_count/private.new_count are gone; hdb_month_label,
