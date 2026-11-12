@@ -16,6 +16,20 @@ mrt = [m for m in json.load(open(f"{REPO}/index_data/nearby_amenities.json"))["c
        if m.get("name") and m["name"] != "<Null>"]
 mrt_xy = np.array([[m["lat"], m["lng"]] for m in mrt])
 
+
+bh = json.load(open(f"{REPO}/index_data/block_history.json"))["hdb"]
+_rows = []
+for e in bh:
+    for yr, v in e["years"].items():
+        if 2019 <= int(yr) <= 2024:
+            _rows.append((e["town"], e["blk"], e["st"], e["type"], int(yr), v["med"], v["n"]))
+_bh = pd.DataFrame(_rows, columns=["town", "blk", "st", "type", "yr", "med", "n"])
+_tt = _bh.groupby(["town", "type", "yr"]).apply(lambda g: np.average(g["med"], weights=g["n"])).rename("tmed").reset_index()
+_bh = _bh.merge(_tt, on=["town", "type", "yr"])
+_bh["ratio"] = np.log(_bh["med"] / _bh["tmed"])
+BLOCK_PREM = (_bh.groupby(["blk", "st", "type"]).apply(lambda g: pd.Series({"prem": np.average(g["ratio"], weights=g["n"]), "prem_n": g["n"].sum()})))
+BLOCK_PREM_ANY = _bh.groupby(["blk", "st"]).apply(lambda g: np.average(g["ratio"], weights=g["n"]))
+
 def km(lat1, lng1, lat2, lng2):
     p = math.pi / 180
     a = (np.sin((lat2 - lat1) * p / 2) ** 2 + np.cos(lat1 * p) * np.cos(lat2 * p) * np.sin((lng2 - lng1) * p / 2) ** 2)
@@ -42,6 +56,10 @@ def features(df):
         la, ln = f["lat"].values[ok][:, None], f["lng"].values[ok][:, None]
         d[ok] = km(la, ln, mrt_xy[:, 0][None, :], mrt_xy[:, 1][None, :]).min(axis=1)
     f["mrt_km"] = d
+    k3 = list(zip(df["blk"], df["st"], df["type"]))
+    f["blk_prem"] = [BLOCK_PREM["prem"].get(k, np.nan) for k in k3]
+    f["blk_prem_n"] = [BLOCK_PREM["prem_n"].get(k, 0) for k in k3]
+    f["blk_prem_any"] = [BLOCK_PREM_ANY.get((b, st), np.nan) for b, st, _ in k3]
     return f
 
 if __name__ == "__main__":

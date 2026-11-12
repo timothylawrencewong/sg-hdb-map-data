@@ -37,8 +37,8 @@
   ]
  },
  "range_band_log": [
-  -0.0593,
-  0.0648
+  -0.0584,
+  0.0625
  ],
  "features": [
   "town",
@@ -49,7 +49,10 @@
   "month",
   "lat",
   "lng",
-  "mrt_km"
+  "mrt_km",
+  "blk_prem",
+  "blk_prem_n",
+  "blk_prem_any"
  ],
  "trained_through": 202611
 }
