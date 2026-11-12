@@ -1,0 +1,59 @@
+{
+ "trained_on": 19404,
+ "tested_on": 4541,
+ "test_months": [
+  202609,
+  202610,
+  202611
+ ],
+ "mae_sgd": 27405,
+ "median_abs_err_sgd": 18931,
+ "mape_pct": 3.92,
+ "median_ape_pct": 3.04,
+ "within_5pct": 72.1,
+ "within_10pct": 93.7,
+ "range_band_log": [
+  -0.0598,
+  0.0635
+ ],
+ "range_coverage_pct": 80.0,
+ "missing_coords_pct": 1.71,
+ "median_ape_by_type": [
+  {
+   "type": "2-room",
+   "count": 128,
+   "median": 3.12
+  },
+  {
+   "type": "3-room",
+   "count": 943,
+   "median": 3.11
+  },
+  {
+   "type": "4-room",
+   "count": 1879,
+   "median": 2.74
+  },
+  {
+   "type": "5-room",
+   "count": 1210,
+   "median": 3.21
+  },
+  {
+   "type": "Executive",
+   "count": 381,
+   "median": 3.73
+  }
+ ],
+ "feature_importance_gain": {
+  "sqm": 8792.0,
+  "type": 4474.0,
+  "town": 3819.0,
+  "lease_left": 3022.0,
+  "lng": 718.0,
+  "storey": 689.0,
+  "lat": 592.0,
+  "mrt_km": 400.0,
+  "month": 44.0
+ }
+}
