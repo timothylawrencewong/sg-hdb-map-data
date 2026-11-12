@@ -52,7 +52,10 @@ if __name__ == "__main__":
     cut = sorted(tx["ym"].unique())[-3]
     tr, te = tx["ym"] < cut, tx["ym"] >= cut
     params = dict(objective="regression", learning_rate=0.05, num_leaves=63, min_data_in_leaf=20,
-                  feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=1, verbose=-1, seed=42)
+                  feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=1, verbose=-1, seed=42,
+                  # price can only go up with floor area, storey and remaining lease
+                  monotone_constraints=[1 if c in ("sqm", "storey", "lease_left") else 0 for c in X.columns],
+                  monotone_constraints_method="advanced")
     m = lgb.train(params, lgb.Dataset(X[tr], y[tr]), num_boost_round=1500)
     pred = np.exp(m.predict(X[te])); act = tx.loc[te, "price"].values
     err = np.abs(pred - act); pct = err / act
