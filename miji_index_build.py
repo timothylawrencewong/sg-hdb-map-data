@@ -686,6 +686,8 @@ def build_recent_hdb_transactions(recent_months=RECENT_MONTHS):
             "lease": (row.get("remaining_lease") or "").strip(),  # e.g. "67 years 04 months"
             "price": int(price),
             "ym": ym,
+            "model": (row.get("flat_model") or "").strip().title(),  # e.g. "Maisonette", "Dbss", "Premium Apartment"
+            "lc": int(float(row.get("lease_commence_date") or 0) or 0),  # lease start year, e.g. 1987
         })
     say("   kept %d individual transactions from the last %d months" % (len(rows), recent_months))
     return rows

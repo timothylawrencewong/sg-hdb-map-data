@@ -62,6 +62,18 @@ for t in _town_files:
             BLOCK_INFO[str(b["p"])] = (b.get("fl"), b.get("un"), b.get("y"))
 CBD = (1.2840, 103.8515)
 
+# fallback coordinates from the town files, for blocks the geocode cache doesn't have (e.g. "Everton Pk")
+_ABBR = {"avenue": "ave", "street": "st", "road": "rd", "park": "pk", "drive": "dr", "crescent": "cres",
+         "central": "ctrl", "north": "nth", "south": "sth", "upper": "upp", "lorong": "lor", "jalan": "jln",
+         "close": "cl", "place": "pl", "bukit": "bt", "kampong": "kg", "terrace": "ter", "heights": "hts",
+         "garden": "gdn", "gardens": "gdns", "commonwealth": "c'wealth", "market": "mkt", "tanjong": "tg"}
+def _norm_st(st):
+    return " ".join(_ABBR.get(w, w) for w in re.sub(r"[^a-z0-9' ]", " ", str(st).lower()).split())
+FALLBACK_XY = {}
+for t in _town_files:
+    for b in t["B"]:
+        FALLBACK_XY[(str(b["b"]).upper(), _norm_st(b["st"]))] = (b["a"], b["o"], str(b.get("p", "")))
+
 def km(lat1, lng1, lat2, lng2):
     p = math.pi / 180
     a = (np.sin((lat2 - lat1) * p / 2) ** 2 + np.cos(lat1 * p) * np.cos(lat2 * p) * np.sin((lng2 - lng1) * p / 2) ** 2)
@@ -80,8 +92,14 @@ def features(df):
     f["lease_left"] = df["lease"].map(lease_years)
     f["month"] = (df["ym"] // 100 - 2017) * 12 + df["ym"] % 100  # months since Jan 2017
     key = df["blk"].astype(str) + "|" + df["st"].astype(str)
-    f["lat"] = key.map(lambda k: coords.get(k, {}).get("lat", np.nan))
-    f["lng"] = key.map(lambda k: coords.get(k, {}).get("lng", np.nan))
+    def _xy(blk, st):
+        c = coords.get(f"{blk}|{st}")
+        if c:
+            return c["lat"], c["lng"], str(c.get("postal", ""))
+        return FALLBACK_XY.get((str(blk).upper(), _norm_st(st)), (np.nan, np.nan, ""))
+    xy = [_xy(b, st) for b, st in zip(df["blk"], df["st"])]
+    f["lat"] = [v[0] for v in xy]
+    f["lng"] = [v[1] for v in xy]
     d = np.full(len(df), np.nan)
     ok = f["lat"].notna().values
     if ok.any():
@@ -101,11 +119,14 @@ def features(df):
         dm = km(la, ln, mrt_xy[:, 0][None, :], mrt_xy[:, 1][None, :])
         c = np.full(len(df), np.nan); c[ok2] = (dm <= 1.0).sum(axis=1); f["mrt_1km"] = c
         v = np.full(len(df), np.nan); v[ok2] = km(la[:, 0], ln[:, 0], CBD[0], CBD[1]); f["cbd_km"] = v
-        post = key.map(lambda k: str(coords.get(k, {}).get("postal", "")))
+        post = pd.Series([v[2] for v in xy], index=df.index)
         info = post.map(lambda p: BLOCK_INFO.get(p, (None, None, None)))
         f["blk_floors"] = info.map(lambda x: x[0]).astype(float)
         f["blk_units"] = info.map(lambda x: x[1]).astype(float)
         f["blk_year"] = info.map(lambda x: x[2]).astype(float)
+    if "model" in df.columns and os.environ.get("FLAT_MODEL", "1") == "1":
+        f["flat_model"] = df["model"].fillna("").astype(str).replace("", "Unknown").astype("category")
+        f["lease_start"] = df["lc"].replace(0, np.nan).astype(float)
     k3 = list(zip(df["blk"], df["st"], df["type"]))
     f["blk_prem"] = [BLOCK_PREM["prem"].get(k, np.nan) for k in k3]
     f["blk_prem_n"] = [BLOCK_PREM["prem_n"].get(k, 0) for k in k3]
@@ -114,7 +135,7 @@ def features(df):
 
 if __name__ == "__main__":
     X = features(hist_all); y = np.log(hist_all["price"].astype(float))
-    cats = {c: X[c].cat.categories for c in ["town", "type"]}
+    cats = {c: X[c].cat.categories for c in X.columns if str(X[c].dtype) == "category"}
 
     # time holdout: train on older months, test on the latest 3
     cut = sorted(hist_all["ym"].unique())[-3]

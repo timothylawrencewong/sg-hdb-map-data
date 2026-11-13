@@ -1,0 +1,30 @@
+name: ML flat-model experiment
+
+# Temporary: runs on the ml-flat-model branch only. Nothing is published to the live site.
+
+on:
+  push:
+    branches: [ml-flat-model]
+
+permissions:
+  contents: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r ml/requirements.txt
+      - env:
+          PYTHONUNBUFFERED: '1'
+        run: python3 ml/compare_model.py
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ml/report_model.json
+          git commit -m "ML flat-model experiment report" || exit 0
+          git push origin HEAD:ml-flat-model

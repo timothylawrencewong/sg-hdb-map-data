@@ -18,7 +18,10 @@ def months_between(a, b):
 
 top = tx.assign(t=tx["storey"].str.slice(-2).astype(int)).groupby(["blk", "st"])["t"].max()
 rows = []
-for (town, blk, st, typ), g in tx.groupby(["town", "blk", "st", "type"]):
+has_model = "model" in tx.columns
+if not has_model:
+    tx = tx.assign(model="", lc=0)
+for (town, blk, st, typ, fm), g in tx.groupby(["town", "blk", "st", "type", "model"]):
     g = g.sort_values("ym")
     last = g.iloc[-1]
     sqm = float(g["sqm"].median())
@@ -29,13 +32,16 @@ for (town, blk, st, typ), g in tx.groupby(["town", "blk", "st", "type"]):
     lease_txt = f"{lm // 12} years {lm % 12:02d} months"
     bands = [f"{a:02d} TO {a + 2:02d}" for a in range(1, int(top[(blk, st)]) + 1, 3)]
     for band in bands:
-        rows.append(dict(town=town, blk=blk, st=st, type=typ, storey=band, sqm=sqm,
+        rows.append(dict(town=town, blk=blk, st=st, type=typ, model=fm, lc=int(g["lc"].max()), storey=band, sqm=sqm,
                          lease=lease_txt, ym=latest, n=int(len(g))))
 
 grid = pd.DataFrame(rows)
 X = features(grid)
-for c in ["town", "type"]:
-    X[c] = pd.Categorical(X[c].astype(str), categories=meta["cats"][c])
+if not has_model:
+    X = X.drop(columns=[c for c in ("flat_model", "lease_start") if c in X.columns])
+for c, cats in meta["cats"].items():
+    X[c] = pd.Categorical(X[c].astype(str), categories=cats)
+X = X[meta["features"]]
 p = np.exp(model.predict(X))
 grid["est"] = (np.round(p / 1000) * 1000).astype(int)
 grid["lo"] = (np.round(p * np.exp(lo_b) / 1000) * 1000).astype(int)
@@ -49,8 +55,8 @@ note = ("Machine-learning price estimate, not a valuation. Estimated from HDB re
 for town, g in grid.groupby("town"):
     blocks = {}
     for r in g.itertuples():
-        k = f"{r.blk}|{r.st}|{r.type}"
-        b = blocks.setdefault(k, {"blk": r.blk, "st": r.st, "type": r.type, "sqm": r.sqm,
+        k = f"{r.blk}|{r.st}|{r.type}|{r.model}"
+        b = blocks.setdefault(k, {"blk": r.blk, "st": r.st, "type": r.type, "model": r.model or None, "sqm": r.sqm,
                                   "lease": r.lease, "sales_12m": r.n, "storeys": {}})
         b["storeys"][r.storey] = [int(r.lo), int(r.est), int(r.hi)]
     json.dump({"town": town, "as_of": latest, "model": "LightGBM v1", "note": note,
