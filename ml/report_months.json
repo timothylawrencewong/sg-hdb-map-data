@@ -1,0 +1,84 @@
+[
+ {
+  "month": "Oct 2026 (monthly final)",
+  "sales": 2169,
+  "median_ape_pct": 2.79,
+  "within_5pct": 74.6,
+  "within_10pct": 95.0,
+  "median_sale": 650000.0,
+  "median_estimate": 650944,
+  "top_sales": [
+   {
+    "sale": "Queenstown 96 Dawson Rd, 5-room, 40 TO 42",
+    "sold": 1818000,
+    "model": 1683892,
+    "off_pct": -7.4
+   },
+   {
+    "sale": "Bishan 273A Bishan St 24, 5-room, 37 TO 39",
+    "sold": 1711000,
+    "model": 1662870,
+    "off_pct": -2.8
+   },
+   {
+    "sale": "Central Area 1A Cantonment Rd, 5-room, 46 TO 48",
+    "sold": 1710000,
+    "model": 1710397,
+    "off_pct": 0.0
+   },
+   {
+    "sale": "Bishan 273B Bishan St 24, 5-room, 31 TO 33",
+    "sold": 1688000,
+    "model": 1644098,
+    "off_pct": -2.6
+   },
+   {
+    "sale": "Kallang/Whampoa 9 Boon Keng Rd, 5-room, 34 TO 36",
+    "sold": 1640000,
+    "model": 1588869,
+    "off_pct": -3.1
+   }
+  ]
+ },
+ {
+  "month": "Nov 2026 so far (weekly update)",
+  "sales": 790,
+  "median_ape_pct": 2.75,
+  "within_5pct": 76.6,
+  "within_10pct": 95.3,
+  "median_sale": 650000.0,
+  "median_estimate": 646909,
+  "top_sales": [
+   {
+    "sale": "Bedok 152B Bedok Sth Rd, 5-room, 16 TO 18",
+    "sold": 1588000,
+    "model": 1515095,
+    "off_pct": -4.6
+   },
+   {
+    "sale": "Toa Payoh 109B Bidadari Pk Dr, 5-room, 10 TO 12",
+    "sold": 1580000,
+    "model": 1463925,
+    "off_pct": -7.3
+   },
+   {
+    "sale": "Central Area 1E Cantonment Rd, 4-room, 46 TO 48",
+    "sold": 1495000,
+    "model": 1531313,
+    "off_pct": 2.4
+   },
+   {
+    "sale": "Bedok 152C Bedok Sth Rd, 5-room, 07 TO 09",
+    "sold": 1410000,
+    "model": 1370188,
+    "off_pct": -2.8
+   },
+   {
+    "sale": "Geylang 56 Cassia Cres, 5-room, 19 TO 21",
+    "sold": 1360000,
+    "model": 1335952,
+    "off_pct": -1.8
+   }
+  ]
+ }
+]
