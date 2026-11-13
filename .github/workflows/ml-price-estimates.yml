@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ml-price-estimates]   # so the branch gets real estimates before it is merged
-    paths: ['ml/train.py', 'ml/predict.py', '.github/workflows/ml-price-estimates.yml']
+    paths: ['ml/train.py', 'ml/predict.py', 'ml/train_condo.py', '.github/workflows/ml-price-estimates.yml']
 
 permissions:
   contents: write
@@ -58,11 +58,23 @@ jobs:
           FULL_HISTORY: '1'
         run: python3 ml/predict.py
 
+      - name: Condo / apartment / EC estimates
+        run: |
+          python3 ml/train_condo.py > /tmp/condo.log
+          python3 - <<'PY'
+          import json, sys
+          r = json.load(open("ml/condo_report.json"))
+          print("Condo resale median error %.2f%%, within 10%%: %.1f%%" % (r["resale_median_ape_pct"], r["resale_within_10pct"]))
+          if r["resale_median_ape_pct"] > 7 or r["resale_within_10pct"] < 75:
+              sys.exit("STOP: condo accuracy worse than the limit. Condo estimates not rebuilt.")
+          PY
+          python3 ml/train_condo.py --publish | tail -1
+
       - name: Publish
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add estimates ml/report.json ml/miji_price_meta.json ml/miji_price_model.txt
+          git add estimates ml/report.json ml/condo_report.json ml/miji_price_meta.json ml/miji_price_model.txt
           if git diff --cached --quiet; then
             echo "Nothing changed since the last run."
           else
