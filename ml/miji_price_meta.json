@@ -1,0 +1,72 @@
+{
+ "cats": {
+  "town": [
+   "Ang Mo Kio",
+   "Bedok",
+   "Bishan",
+   "Bukit Batok",
+   "Bukit Merah",
+   "Bukit Panjang",
+   "Bukit Timah",
+   "Central Area",
+   "Choa Chu Kang",
+   "Clementi",
+   "Geylang",
+   "Hougang",
+   "Jurong East",
+   "Jurong West",
+   "Kallang/Whampoa",
+   "Marine Parade",
+   "Pasir Ris",
+   "Punggol",
+   "Queenstown",
+   "Sembawang",
+   "Sengkang",
+   "Serangoon",
+   "Tampines",
+   "Toa Payoh",
+   "Woodlands",
+   "Yishun"
+  ],
+  "type": [
+   "2-room",
+   "3-room",
+   "4-room",
+   "5-room",
+   "Executive"
+  ]
+ },
+ "range_band_log": [
+  -0.056,
+  0.0577
+ ],
+ "features": [
+  "town",
+  "type",
+  "sqm",
+  "storey",
+  "lease_left",
+  "month",
+  "lat",
+  "lng",
+  "mrt_km",
+  "prim_km",
+  "prim_1km",
+  "sec_km",
+  "hawker_km",
+  "hawker_1km",
+  "park_km",
+  "superm_km",
+  "superm_1km",
+  "lrt_km",
+  "mrt_1km",
+  "cbd_km",
+  "blk_floors",
+  "blk_units",
+  "blk_year",
+  "blk_prem",
+  "blk_prem_n",
+  "blk_prem_any"
+ ],
+ "trained_through": 202611
+}

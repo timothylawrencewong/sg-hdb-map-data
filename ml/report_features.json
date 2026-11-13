@@ -1,0 +1,92 @@
+{
+ "test_months": [
+  202609,
+  202610,
+  202611
+ ],
+ "test_rows": 5196,
+ "results": [
+  {
+   "variant": "current (v2)",
+   "features": 12,
+   "median_ape_pct": 2.83,
+   "mape_pct": 3.69,
+   "within_5pct": 73.9,
+   "within_10pct": 95.0,
+   "mae_sgd": 25788
+  },
+  {
+   "variant": "+ schools",
+   "features": 15,
+   "median_ape_pct": 2.85,
+   "mape_pct": 3.66,
+   "within_5pct": 74.5,
+   "within_10pct": 94.9,
+   "mae_sgd": 25615
+  },
+  {
+   "variant": "+ hawkers and supermarkets",
+   "features": 16,
+   "median_ape_pct": 2.84,
+   "mape_pct": 3.65,
+   "within_5pct": 74.1,
+   "within_10pct": 95.2,
+   "mae_sgd": 25470
+  },
+  {
+   "variant": "+ parks, LRT, MRT count, distance to CBD",
+   "features": 16,
+   "median_ape_pct": 2.81,
+   "mape_pct": 3.66,
+   "within_5pct": 74.5,
+   "within_10pct": 94.7,
+   "mae_sgd": 25578
+  },
+  {
+   "variant": "+ block height, units, year built",
+   "features": 15,
+   "median_ape_pct": 2.79,
+   "mape_pct": 3.65,
+   "within_5pct": 74.6,
+   "within_10pct": 94.9,
+   "mae_sgd": 25505
+  },
+  {
+   "variant": "everything",
+   "features": 26,
+   "median_ape_pct": 2.79,
+   "mape_pct": 3.63,
+   "within_5pct": 74.6,
+   "within_10pct": 94.8,
+   "mae_sgd": 25397,
+   "importance_pct": {
+    "type": 24.0,
+    "month": 21.2,
+    "sqm": 20.7,
+    "town": 11.8,
+    "blk_prem": 9.8,
+    "blk_prem_any": 6.0,
+    "cbd_km": 1.9,
+    "storey": 1.2,
+    "lease_left": 0.9,
+    "blk_year": 0.6,
+    "lng": 0.5,
+    "blk_floors": 0.3,
+    "lat": 0.3,
+    "mrt_km": 0.2,
+    "lrt_km": 0.1,
+    "sec_km": 0.1,
+    "park_km": 0.1,
+    "hawker_km": 0.1,
+    "blk_units": 0.1,
+    "prim_km": 0.1,
+    "superm_km": 0.1,
+    "blk_prem_n": 0.1,
+    "superm_1km": 0.0,
+    "mrt_1km": 0.0,
+    "hawker_1km": 0.0,
+    "prim_1km": 0.0
+   }
+  }
+ ]
+}
