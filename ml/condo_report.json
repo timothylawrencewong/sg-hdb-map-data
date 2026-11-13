@@ -1,0 +1,80 @@
+{
+ "history_from": 202110,
+ "trained_on": 114329,
+ "tested_on": 4245,
+ "test_months": [
+  202608,
+  202609,
+  202610
+ ],
+ "median_ape_pct": 3.87,
+ "mape_pct": 6.53,
+ "within_5pct": 59.4,
+ "within_10pct": 80.7,
+ "mae_sgd": 152932,
+ "range_band_log": [
+  -0.0701,
+  0.0861
+ ],
+ "resale_median_ape_pct": 3.68,
+ "resale_within_5pct": 63.2,
+ "resale_within_10pct": 86.8,
+ "by_type": {
+  "Apartment": [
+   1961,
+   4.9
+  ],
+  "Condominium": [
+   1843,
+   3.52
+  ],
+  "Executive Condominium": [
+   441,
+   2.52
+  ]
+ },
+ "by_sale": {
+  "new sale": [
+   1043,
+   5.64
+  ],
+  "sub-sale": [
+   102,
+   3.14
+  ],
+  "resale": [
+   3100,
+   3.68
+  ]
+ },
+ "by_segment": {
+  "CCR": [
+   596,
+   4.86
+  ],
+  "OCR": [
+   2445,
+   3.69
+  ],
+  "RCR": [
+   1204,
+   3.74
+  ]
+ },
+ "importance_pct": {
+  "sqm": 47.0,
+  "project": 16.9,
+  "district": 16.0,
+  "sale": 9.6,
+  "month": 2.3,
+  "seg": 2.3,
+  "lease_left": 2.1,
+  "cbd_km": 1.7,
+  "floor": 0.5,
+  "mrt_km": 0.5,
+  "lat": 0.5,
+  "lng": 0.3,
+  "ptype": 0.3,
+  "lease_years": 0.0
+ }
+}
