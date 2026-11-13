@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ml-price-estimates]   # so the branch gets real estimates before it is merged
-    paths: ['ml/predict.py', '.github/workflows/ml-price-estimates.yml']
+    paths: ['ml/train.py', 'ml/predict.py', '.github/workflows/ml-price-estimates.yml']
 
 permissions:
   contents: write
