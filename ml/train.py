@@ -40,6 +40,28 @@ _bh["ratio"] = np.log(_bh["med"] / _bh["tmed"])
 BLOCK_PREM = (_bh.groupby(["blk", "st", "type"]).apply(lambda g: pd.Series({"prem": np.average(g["ratio"], weights=g["n"]), "prem_n": g["n"].sum()})))
 BLOCK_PREM_ANY = _bh.groupby(["blk", "st"]).apply(lambda g: np.average(g["ratio"], weights=g["n"]))
 
+
+# ---- extra location features (all from files already in this repo)
+import glob as _glob
+_town_files = [json.load(open(p)) for p in sorted(_glob.glob(f"{REPO}/data/*.json")) if isinstance(json.load(open(p)), dict) and "B" in json.load(open(p))]
+def _uniq(pts):
+    return np.array(sorted({(round(a, 5), round(b, 5)) for a, b in pts}))
+_cat = json.load(open(f"{REPO}/index_data/nearby_amenities.json"))["categories"]
+AMEN = {
+    "prim": _uniq((k[2], k[3]) for t in _town_files for k in t.get("K", []) if k[1] in ("P", "M")),
+    "sec": _uniq((k[2], k[3]) for t in _town_files for k in t.get("K", []) if k[1] in ("S", "M")),
+    "hawker": _uniq((h["lat"], h["lng"]) for h in _cat["hawker"]),
+    "park": _uniq((h["lat"], h["lng"]) for h in _cat["park"]),
+    "superm": _uniq((x[1], x[2]) for t in _town_files for x in t.get("SM", [])),
+    "lrt": _uniq((m["lat"], m["lng"]) for m in _cat["mrt"] if m.get("rail_type") == "LRT"),
+}
+BLOCK_INFO = {}
+for t in _town_files:
+    for b in t["B"]:
+        if b.get("p"):
+            BLOCK_INFO[str(b["p"])] = (b.get("fl"), b.get("un"), b.get("y"))
+CBD = (1.2840, 103.8515)
+
 def km(lat1, lng1, lat2, lng2):
     p = math.pi / 180
     a = (np.sin((lat2 - lat1) * p / 2) ** 2 + np.cos(lat1 * p) * np.cos(lat2 * p) * np.sin((lng2 - lng1) * p / 2) ** 2)
@@ -66,6 +88,24 @@ def features(df):
         la, ln = f["lat"].values[ok][:, None], f["lng"].values[ok][:, None]
         d[ok] = km(la, ln, mrt_xy[:, 0][None, :], mrt_xy[:, 1][None, :]).min(axis=1)
     f["mrt_km"] = d
+    if os.environ.get("EXTRA_FEATURES", "1") == "1":
+        ok2 = f["lat"].notna().values
+        la, ln = f["lat"].values[ok2][:, None], f["lng"].values[ok2][:, None]
+        for name, pts in AMEN.items():
+            if not len(pts):
+                continue
+            dd = km(la, ln, pts[:, 0][None, :], pts[:, 1][None, :])
+            v = np.full(len(df), np.nan); v[ok2] = dd.min(axis=1); f[name + "_km"] = v
+            if name in ("prim", "hawker", "superm"):
+                c = np.full(len(df), np.nan); c[ok2] = (dd <= 1.0).sum(axis=1); f[name + "_1km"] = c
+        dm = km(la, ln, mrt_xy[:, 0][None, :], mrt_xy[:, 1][None, :])
+        c = np.full(len(df), np.nan); c[ok2] = (dm <= 1.0).sum(axis=1); f["mrt_1km"] = c
+        v = np.full(len(df), np.nan); v[ok2] = km(la[:, 0], ln[:, 0], CBD[0], CBD[1]); f["cbd_km"] = v
+        post = key.map(lambda k: str(coords.get(k, {}).get("postal", "")))
+        info = post.map(lambda p: BLOCK_INFO.get(p, (None, None, None)))
+        f["blk_floors"] = info.map(lambda x: x[0]).astype(float)
+        f["blk_units"] = info.map(lambda x: x[1]).astype(float)
+        f["blk_year"] = info.map(lambda x: x[2]).astype(float)
     k3 = list(zip(df["blk"], df["st"], df["type"]))
     f["blk_prem"] = [BLOCK_PREM["prem"].get(k, np.nan) for k in k3]
     f["blk_prem_n"] = [BLOCK_PREM["prem_n"].get(k, 0) for k in k3]
