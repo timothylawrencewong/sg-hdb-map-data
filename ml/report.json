@@ -7,28 +7,28 @@
   202611
  ],
  "history_from": 201701,
- "mae_sgd": 25544,
- "median_abs_err_sgd": 17787,
- "mape_pct": 3.65,
- "median_ape_pct": 2.8,
- "within_5pct": 74.7,
- "within_10pct": 94.6,
+ "mae_sgd": 25457,
+ "median_abs_err_sgd": 18024,
+ "mape_pct": 3.64,
+ "median_ape_pct": 2.82,
+ "within_5pct": 74.5,
+ "within_10pct": 94.8,
  "range_band_log": [
-  -0.056,
-  0.0577
+  -0.0563,
+  0.058
  ],
  "range_coverage_pct": 80.0,
- "missing_coords_pct": 1.06,
+ "missing_coords_pct": 0.07,
  "median_ape_by_type": [
   {
    "type": "2-room",
    "count": 144,
-   "median": 2.68
+   "median": 2.73
   },
   {
    "type": "3-room",
    "count": 1082,
-   "median": 2.89
+   "median": 2.91
   },
   {
    "type": "4-room",
@@ -38,40 +38,42 @@
   {
    "type": "5-room",
    "count": 1381,
-   "median": 2.94
+   "median": 3.01
   },
   {
    "type": "Executive",
    "count": 431,
-   "median": 2.84
+   "median": 2.81
   }
  ],
  "feature_importance_gain": {
-  "type": 67891.0,
-  "month": 59349.0,
-  "sqm": 55069.0,
-  "town": 32665.0,
-  "blk_prem": 26382.0,
-  "blk_prem_any": 17966.0,
-  "cbd_km": 5384.0,
-  "storey": 3409.0,
-  "lease_left": 2062.0,
-  "blk_year": 1380.0,
-  "lng": 1294.0,
-  "blk_floors": 707.0,
-  "lat": 634.0,
-  "mrt_km": 412.0,
-  "lrt_km": 292.0,
-  "park_km": 187.0,
-  "hawker_km": 185.0,
-  "sec_km": 179.0,
-  "prim_km": 174.0,
-  "blk_units": 170.0,
-  "superm_km": 162.0,
-  "blk_prem_n": 150.0,
-  "superm_1km": 78.0,
-  "prim_1km": 53.0,
-  "hawker_1km": 53.0,
-  "mrt_1km": 50.0
+  "month": 58641.0,
+  "type": 57969.0,
+  "sqm": 56375.0,
+  "town": 33638.0,
+  "blk_prem": 27324.0,
+  "blk_prem_any": 17459.0,
+  "flat_model": 7045.0,
+  "cbd_km": 3901.0,
+  "storey": 3309.0,
+  "lease_start": 2741.0,
+  "blk_floors": 1513.0,
+  "lng": 1289.0,
+  "blk_year": 1199.0,
+  "lat": 714.0,
+  "lease_left": 436.0,
+  "mrt_km": 417.0,
+  "blk_units": 396.0,
+  "blk_prem_n": 238.0,
+  "lrt_km": 218.0,
+  "park_km": 184.0,
+  "prim_km": 172.0,
+  "hawker_km": 172.0,
+  "sec_km": 170.0,
+  "superm_km": 152.0,
+  "mrt_1km": 86.0,
+  "superm_1km": 71.0,
+  "hawker_1km": 48.0,
+  "prim_1km": 46.0
  }
 }

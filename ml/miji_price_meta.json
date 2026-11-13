@@ -34,11 +34,33 @@
    "4-room",
    "5-room",
    "Executive"
+  ],
+  "flat_model": [
+   "2-Room",
+   "3Gen",
+   "Adjoined Flat",
+   "Apartment",
+   "Dbss",
+   "Improved",
+   "Improved-Maisonette",
+   "Maisonette",
+   "Model A",
+   "Model A-Maisonette",
+   "Model A2",
+   "New Generation",
+   "Premium Apartment",
+   "Premium Apartment Loft",
+   "Premium Maisonette",
+   "Simplified",
+   "Standard",
+   "Terrace",
+   "Type S1",
+   "Type S2"
   ]
  },
  "range_band_log": [
-  -0.056,
-  0.0577
+  -0.0563,
+  0.058
  ],
  "features": [
   "town",
@@ -64,6 +86,8 @@
   "blk_floors",
   "blk_units",
   "blk_year",
+  "flat_model",
+  "lease_start",
   "blk_prem",
   "blk_prem_n",
   "blk_prem_any"
