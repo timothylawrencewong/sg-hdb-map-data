@@ -1,0 +1,60 @@
+{
+ "test_months": [
+  202609,
+  202610,
+  202611
+ ],
+ "test_rows": 5196,
+ "results": [
+  {
+   "variant": "last 12 months (current)",
+   "train_rows": 19401,
+   "median_ape_pct": 3.11,
+   "mape_pct": 3.99,
+   "within_5pct": 70.5,
+   "within_10pct": 93.4,
+   "mae_sgd": 27624,
+   "exec_median_ape_pct": 3.23
+  },
+  {
+   "variant": "full history since 2017",
+   "train_rows": 239279,
+   "median_ape_pct": 2.83,
+   "mape_pct": 3.69,
+   "within_5pct": 73.9,
+   "within_10pct": 95.0,
+   "mae_sgd": 25788,
+   "exec_median_ape_pct": 2.83
+  },
+  {
+   "variant": "full history, recent sales weighted (half-life 24 months)",
+   "train_rows": 239279,
+   "median_ape_pct": 2.87,
+   "mape_pct": 3.72,
+   "within_5pct": 73.2,
+   "within_10pct": 94.9,
+   "mae_sgd": 25866,
+   "exec_median_ape_pct": 2.85
+  },
+  {
+   "variant": "full history, recent sales weighted (half-life 12 months)",
+   "train_rows": 239279,
+   "median_ape_pct": 2.9,
+   "mape_pct": 3.78,
+   "within_5pct": 73.1,
+   "within_10pct": 94.3,
+   "mae_sgd": 26270,
+   "exec_median_ape_pct": 2.8
+  },
+  {
+   "variant": "last 36 months",
+   "train_rows": 72270,
+   "median_ape_pct": 2.89,
+   "mape_pct": 3.74,
+   "within_5pct": 73.2,
+   "within_10pct": 94.7,
+   "mae_sgd": 25936,
+   "exec_median_ape_pct": 2.8
+  }
+ ]
+}
