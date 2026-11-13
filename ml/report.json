@@ -6,15 +6,16 @@
   202610,
   202611
  ],
- "mae_sgd": 26780,
- "median_abs_err_sgd": 18758,
- "mape_pct": 3.84,
- "median_ape_pct": 2.98,
- "within_5pct": 72.4,
- "within_10pct": 94.0,
+ "history_from": 202512,
+ "mae_sgd": 27789,
+ "median_abs_err_sgd": 19554,
+ "mape_pct": 3.99,
+ "median_ape_pct": 3.11,
+ "within_5pct": 70.5,
+ "within_10pct": 93.2,
  "range_band_log": [
-  -0.0584,
-  0.0625
+  -0.0612,
+  0.0652
  ],
  "range_coverage_pct": 80.0,
  "missing_coords_pct": 1.71,
@@ -22,41 +23,41 @@
   {
    "type": "2-room",
    "count": 128,
-   "median": 3.1
+   "median": 3.2
   },
   {
    "type": "3-room",
    "count": 943,
-   "median": 2.93
+   "median": 3.19
   },
   {
    "type": "4-room",
    "count": 1879,
-   "median": 2.82
+   "median": 2.99
   },
   {
    "type": "5-room",
    "count": 1210,
-   "median": 3.18
+   "median": 3.25
   },
   {
    "type": "Executive",
    "count": 381,
-   "median": 3.16
+   "median": 3.22
   }
  ],
  "feature_importance_gain": {
-  "type": 7338.0,
-  "sqm": 5202.0,
-  "town": 2957.0,
-  "blk_prem": 2799.0,
-  "blk_prem_any": 2069.0,
-  "lat": 526.0,
-  "lng": 493.0,
-  "lease_left": 487.0,
-  "storey": 350.0,
-  "mrt_km": 123.0,
-  "blk_prem_n": 45.0,
-  "month": 44.0
+  "type": 7997.0,
+  "sqm": 4545.0,
+  "town": 2911.0,
+  "blk_prem": 2800.0,
+  "blk_prem_any": 2096.0,
+  "lat": 564.0,
+  "lng": 559.0,
+  "lease_left": 472.0,
+  "storey": 336.0,
+  "mrt_km": 154.0,
+  "month": 65.0,
+  "blk_prem_n": 59.0
  }
 }

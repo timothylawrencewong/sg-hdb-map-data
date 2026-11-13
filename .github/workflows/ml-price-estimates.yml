@@ -1,7 +1,7 @@
 name: ML price estimates
 
-# Retrains Miji's HDB price model (LightGBM) on the latest 12 months of resale
-# transactions in index_data/recent_transactions.json, checks its accuracy on the
+# Retrains Miji's HDB price model (LightGBM) on the full HDB resale history
+# (Jan 2017 onwards, data.gov.sg), checks its accuracy on the
 # most recent 3 months, and republishes estimates/<town>.json + estimates/index.json
 # (read by Jimi's estimate_price tool). Runs monthly, after the data refresh.
 # If accuracy gets worse than the limit below, nothing is published.
@@ -10,6 +10,9 @@ on:
   schedule:
     - cron: '0 6 5 * *'   # the 5th of every month, 2pm Singapore time
   workflow_dispatch:
+  push:
+    branches: [ml-price-estimates]   # so the branch gets real estimates before it is merged
+    paths: ['ml/train.py', 'ml/predict.py', '.github/workflows/ml-price-estimates.yml']
 
 permissions:
   contents: write
@@ -33,6 +36,9 @@ jobs:
         run: pip install -r ml/requirements.txt
 
       - name: Train and test
+        env:
+          FULL_HISTORY: '1'
+          PYTHONUNBUFFERED: '1'
         run: python3 ml/train.py
 
       - name: Check accuracy before publishing
@@ -41,13 +47,15 @@ jobs:
           import json, os, sys
           r = json.load(open("ml/report.json"))
           print("Median error %.2f%%, within 10%%: %.1f%%" % (r["median_ape_pct"], r["within_10pct"]))
-          if r["median_ape_pct"] > 6 or r["within_10pct"] < 85:
+          if r["median_ape_pct"] > 6 or r["within_10pct"] < 85 or r.get("history_from", 0) > 201801:
               sys.exit("STOP: accuracy worse than the limit. Nothing was published.")
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write("SUMMARY=median error %.2f%%, %.1f%% within 10%%\n" % (r["median_ape_pct"], r["within_10pct"]))
           PY
 
       - name: Build estimates
+        env:
+          FULL_HISTORY: '1'
         run: python3 ml/predict.py
 
       - name: Publish
