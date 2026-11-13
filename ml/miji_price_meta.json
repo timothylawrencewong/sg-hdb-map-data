@@ -37,8 +37,8 @@
   ]
  },
  "range_band_log": [
-  -0.0555,
-  0.0597
+  -0.056,
+  0.0577
  ],
  "features": [
   "town",
@@ -50,6 +50,20 @@
   "lat",
   "lng",
   "mrt_km",
+  "prim_km",
+  "prim_1km",
+  "sec_km",
+  "hawker_km",
+  "hawker_1km",
+  "park_km",
+  "superm_km",
+  "superm_1km",
+  "lrt_km",
+  "mrt_1km",
+  "cbd_km",
+  "blk_floors",
+  "blk_units",
+  "blk_year",
   "blk_prem",
   "blk_prem_n",
   "blk_prem_any"
